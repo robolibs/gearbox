@@ -17,6 +17,7 @@ import argparse
 import json
 import math
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -91,8 +92,9 @@ def run(mname: str, kind: str, sname: str, verbose: bool, params: dict | None = 
     plant = Plant(m, yaw=start_heading(sc))
     limit = sc.time_limit or (ref.lap_len * (sc.laps or 1.0) / (0.5 * 0.8 * m.vmax) + 15.0)
     errs, flips, last_w, status, time_s = [], 0, 0.0, "timeout", 0.0
+    tick_ms = []
     dws, prev_w = [], 0.0
-    lost = max(3.0, 2.0 * m.length)
+    lost = max(3.0, 2.0 * m.length, sc.lost)
     movers = [{"spec": mv, "at": list(mv["start"]), "going": mv.get("meet") is None} for mv in sc.movers]
     clear = float("inf")
     while time_s < limit:
@@ -115,7 +117,9 @@ def run(mname: str, kind: str, sname: str, verbose: bool, params: dict | None = 
         clear = min(clear, now_clear)
         state = ondrive.RobotState(pose=((plant.x, plant.y, 0.0), plant.yaw), velocity=(plant.v, plant.w, plant.vy),
                                    allow_move=True, allow_reverse=sc.reverse)
+        tick_at = time.perf_counter()
         cmd = t.tick(state, TICK, world)
+        tick_ms.append(1e3 * (time.perf_counter() - tick_at))
         v, w = (cmd.linear_velocity, cmd.angular_velocity) if cmd.valid else (0.0, 0.0)
         plant.step(v, w, TICK)
         time_s += TICK
@@ -142,7 +146,8 @@ def run(mname: str, kind: str, sname: str, verbose: bool, params: dict | None = 
     rms = math.sqrt(sum(e * e for e in errs) / max(1, len(errs)))
     return {"kind": kind, "status": status, "time": time_s, "rms": rms, "max": max(errs, default=0.0),
             "flips": flips / max(time_s / 60.0, 1e-9), "clear": clear,
-            "jitter": math.sqrt(sum(d * d for d in dws) / max(1, len(dws)))}
+            "jitter": math.sqrt(sum(d * d for d in dws) / max(1, len(dws))),
+            "tick_p95": sorted(tick_ms)[int(0.95 * len(tick_ms))] if tick_ms else 0.0, "tick_max": max(tick_ms, default=0.0)}
 
 
 def main():

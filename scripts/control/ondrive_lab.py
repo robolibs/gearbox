@@ -17,6 +17,7 @@ import argparse
 import json
 import math
 import os
+import random
 import subprocess
 import sys
 import time
@@ -123,6 +124,9 @@ class Scenario:
     movers: list[dict] = field(default_factory=list)
     laps: float = 0.0
     time_limit: float = 0.0
+    # Metres off the path past which a run is lost, when more than the
+    # machine's own allowance.
+    lost: float = 0.0
 
 
 def _arc(cx, cy, r, a0, a1, n):
@@ -170,7 +174,33 @@ def scenario(name: str, s: float) -> Scenario:
                         movers=[_mover((14 * s, -0.1 * s, 0.0), 0.3),
                                 _mover((30 * s, 9 * s, -math.pi / 2), 0.7, (30 * s, 0.0)),
                                 _mover((58 * s, 0.2 * s, math.pi), 0.5, (42 * s, 0.0))])
+    if name == "crowd":
+        # Posts through the corridor the path runs down: four on its line,
+        # the rest scattered over it at least `gap` apart edge to edge, and
+        # traffic crossing through them.
+        rng = random.Random(7)
+        gap = 1.8 * s
+        posts = [(x * s, y * s, 0.45 * s) for x, y in [(9, 0.15), (19, -0.2), (29, 0.1), (39, -0.15)]]
+        for _ in range(5000):
+            if len(posts) >= 40:
+                break
+            r = (0.25 + 0.25 * rng.random()) * s
+            x, y = 5 * s + 38 * s * rng.random(), 4.5 * s * (2 * rng.random() - 1)
+            if all(math.hypot(x - px, y - py) >= r + pr + gap for px, py, pr in posts):
+                posts.append((x, y, r))
+        return Scenario(name, [(0, 0), (48 * s, 0)], static=posts, lost=6.0 * s,
+                        movers=[_mover((17 * s, -9 * s, math.pi / 2), 0.7, (17 * s, 0.0)),
+                                _mover((30 * s, 9 * s, -math.pi / 2), 0.6, (30 * s, 0.0)),
+                                _mover((43 * s, -9 * s, math.pi / 2), 0.8, (43 * s, 0.0))])
     raise SystemExit(f"unknown scenario {name}")
+
+
+def _quantile(values: list[float], q: float) -> float:
+    """The `q` quantile of `values`, 0 when there are none."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(q * len(ordered)))]
 
 
 def _mover(start, speed, meet=None) -> dict:
@@ -178,8 +208,8 @@ def _mover(start, speed, meet=None) -> dict:
 
 
 SCENARIOS = ["line", "s_curve", "corners", "u_turn", "cusp", "loop", "park", "static_obstacle", "crossing", "head_on",
-             "slalom", "overtake", "crossing_both", "mixed"]
-OBSTACLE_SCENARIOS = ["static_obstacle", "crossing", "head_on", "slalom", "overtake", "crossing_both", "mixed"]
+             "slalom", "overtake", "crossing_both", "mixed", "crowd"]
+OBSTACLE_SCENARIOS = ["static_obstacle", "crossing", "head_on", "slalom", "overtake", "crossing_both", "mixed", "crowd"]
 
 
 # ─── geometry ────────────────────────────────────────────────────────
@@ -575,7 +605,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
     scene.setup(densify(pts, 0.2), goal_pose, statics, v_nom)
     length = ref.lap_len * (sc.laps or 1.0)
     limit = sc.time_limit or (length / (SLIP_ALLOWANCE * v_nom) + 15.0)
-    lost_after, lost_since = max(3.0, 2.0 * m.length), None
+    lost_after, lost_since = max(3.0, 2.0 * m.length, sc.lost), None
     log = []
     try:
         clock = SimClock(lab.gb)
@@ -586,6 +616,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
     min_clear = float("inf")
     farthest, driven, last_xy = 0.0, 0.0, (ox, oy)
     flips, last_w = 0, 0.0
+    tick_ms = []
     status = "timeout"
     stalled = 0.0
     while True:
@@ -628,7 +659,9 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
                                    allow_move=True, allow_reverse=sc.reverse)
         dt = max(1e-3, now - last)
         last = now
+        tick_at = time.perf_counter()
         cmd = t.tick(state, dt, world)
+        tick_ms.append(1e3 * (time.perf_counter() - tick_at))
         marks.append(("tick", time.time()))
         v, w = (cmd.linear_velocity, cmd.angular_velocity) if cmd.valid else (0.0, 0.0)
         drive(robot, v, w, st.vx)
@@ -704,6 +737,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
         "min_clearance": round(min_clear, 3) if min_clear != float("inf") else None,
         "flips_per_min": round(flips / max(1e-3, (log[-1][0] if log else 1.0) / 60.0), 1),
         "stalled_s": round(stalled, 1),
+        "tick_ms": {"median": round(_quantile(tick_ms, 0.5), 2), "p95": round(_quantile(tick_ms, 0.95), 2), "max": round(max(tick_ms, default=0.0), 2)},
         "params": params, "log": log,
     }
     return result
@@ -844,7 +878,7 @@ def main():
     kinds = CONTROLLERS if a.controller == "all" else a.controller.split(",")
     names = SCENARIOS if a.scenario == "all" else a.scenario.split(",")
     results = []
-    print(f"{'machine':8} {'controller':18} {'scenario':16} {'status':12} {'time':>6} {'rms':>6} {'max':>6} {'final':>6} {'yaw':>5} {'clear':>6} {'flips':>5} {'stall':>5}")
+    print(f"{'machine':8} {'controller':18} {'scenario':16} {'status':12} {'time':>6} {'rms':>6} {'max':>6} {'final':>6} {'yaw':>5} {'clear':>6} {'flips':>5} {'stall':>5} {'tick95':>6}")
     for sname in names:
         for kind in kinds:
             if sname in OBSTACLE_SCENARIOS and kind not in OBSTACLE_AWARE and a.controller == "all":
@@ -859,7 +893,7 @@ def main():
             yaw = "" if r["final_yaw"] is None else f"{r['final_yaw']:.2f}"
             clear = "" if r["min_clearance"] is None else f"{r['min_clearance']:.2f}"
             print(f"{r['machine']:8} {kind:18} {sname:16} {r['status'][:12]:12} {r['time']:6.1f} {r['cte_rms']:6.2f} "
-                  f"{r['cte_max']:6.2f} {r['final_pos']:6.2f} {yaw:>5} {clear:>6} {r['flips_per_min']:5.1f} {r['stalled_s']:5.1f}", flush=True)
+                  f"{r['cte_max']:6.2f} {r['final_pos']:6.2f} {yaw:>5} {clear:>6} {r['flips_per_min']:5.1f} {r['stalled_s']:5.1f} {r['tick_ms']['p95']:6.1f}", flush=True)
             if a.out:
                 Path(a.out).parent.mkdir(parents=True, exist_ok=True)
                 Path(a.out).write_text(json.dumps(results))
