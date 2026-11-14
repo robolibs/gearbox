@@ -169,7 +169,7 @@ fn continuous_to_all_indexed_palettes_reuses_the_complete_prepared_page() {
             &second.generation.resident().unwrap().pages()[0]
         ));
         assert_eq!(
-            second.pages[0].appearance.samples.values[1].palette_indices,
+            second.pages[0].appearance.samples()[1].palette_indices,
             super::super::palette::indices(3.0)
         );
     }
@@ -206,7 +206,7 @@ fn selector_change_reuses_positions_but_rebuilds_selected_values() {
         &first.pages[0].appearance,
         &second.pages[0].appearance
     ));
-    assert_eq!(second.pages[0].appearance.samples.values[1].value, 0.75);
+    assert_eq!(second.pages[0].appearance.samples()[1].value, 0.75);
 }
 
 #[test]
@@ -946,7 +946,7 @@ fn demand_hollows_other_pages_and_reloads_them_with_their_original_metadata() {
         let (old, new) = (&full.pages[index], &partial.pages[index]);
         let geometry = &new.appearance.geometry;
         assert!(!geometry.resident() && geometry.source().is_none());
-        assert!(geometry.positions.values.is_empty() && new.appearance.samples.values.is_empty());
+        assert!(geometry.positions.values.is_empty() && new.appearance.attributes.words.values.is_empty());
         assert_eq!(geometry.len(), old.appearance.geometry.len());
         assert!(Arc::ptr_eq(
             &geometry.metadata,

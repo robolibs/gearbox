@@ -28,8 +28,8 @@ impl Uploads {
         require(
             *self
                 == Self {
-                    positions: u64::from(items) * 16,
-                    attributes: u64::from(items) * 32,
+                    positions: u64::from(items) * 12,
+                    attributes: u64::from(items) * 4,
                     styles: allocated.styles,
                     placements: allocated.placements,
                 }
@@ -189,8 +189,8 @@ mod tests {
         };
         for items in [65_536, 16_960] {
             let expected = Uploads {
-                positions: items as u64 * 16,
-                attributes: items as u64 * 32,
+                positions: items as u64 * 12,
+                attributes: items as u64 * 4,
                 styles: allocations.styles,
                 placements: allocations.placements,
             };

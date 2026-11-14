@@ -36,6 +36,15 @@ Everything that was neither visualization nor the simulator:
 
 Sections below that describe these are history.
 
+## Compact point records — 2026-11-14
+
+Cloud points drop from 48 to 12 bytes of position plus the attribute words their color
+mode reads: 16 bytes for RGBA, scalar, axis, range and category colors, 20 for age, 12
+for constant color, plus 4 with a radius attribute and one validity bit where values can
+be missing. Source rows moved to a CPU-only table that is empty when every row is valid.
+Legacy compact points use 12-byte positions and samples. The residency probe's GPU cap
+scales with the record (256 to 64 MiB), keeping one bank resident and both over cap.
+
 ## Releases A and B — final checkpoint, 2026-11-13
 
 - Every phase is implemented. The gate list and both bench profiles ran on the final

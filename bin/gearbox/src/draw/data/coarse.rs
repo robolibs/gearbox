@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gearbox_api::draw_data::{Charge, CpuBudget, StorageError};
 
-use super::appearance::Sample;
+use super::appearance::Attributes;
 use super::cloud::{Geometry, Position, Records, invalid};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -88,7 +88,7 @@ pub(super) fn coverage_radius_m(metadata: &super::cloud::SpatialMetadata) -> f32
 }
 
 pub(super) struct Samples {
-    pub records: Records<Sample>,
+    pub attributes: Attributes,
     _charge: Charge,
 }
 
@@ -96,17 +96,11 @@ impl Samples {
     pub fn build(
         budget: &CpuBudget,
         representatives: &Representatives,
-        samples: &[Sample],
+        attributes: &Attributes,
     ) -> Result<Arc<Self>, StorageError> {
         let charge = super::worker::charge(budget, size_of::<Self>() + 16)?;
-        let mut records = Records::new(budget, representatives.ordinals.values.len())?;
-        for (index, ordinal) in representatives.ordinals.values.iter().copied().enumerate() {
-            records.values[index] = *samples
-                .get(ordinal as usize)
-                .ok_or_else(|| invalid("coarse attribute outside source page"))?;
-        }
         Ok(Arc::new(Self {
-            records,
+            attributes: attributes.gather(budget, &representatives.ordinals.values)?,
             _charge: charge,
         }))
     }

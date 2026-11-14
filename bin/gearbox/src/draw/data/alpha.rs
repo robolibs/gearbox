@@ -30,18 +30,23 @@ pub(super) struct Summary {
 }
 
 impl Summary {
+    #[cfg(test)]
     pub fn new(samples: &[Sample]) -> Self {
         let mut result = Self::default();
         for sample in samples {
-            if sample.flags & COLOR_VALID != 0 {
-                result.rgba |= mode((sample.rgba >> 24) as f32 / 255.0);
-            }
-            result.valid_value |= sample.flags & VALUE_VALID != 0;
-            result.missing_value |= sample.flags & VALUE_VALID == 0;
-            result.valid_category |= sample.flags & CATEGORY_VALID != 0;
-            result.missing_category |= sample.flags & CATEGORY_VALID == 0;
+            result.add(sample);
         }
         result
+    }
+
+    pub fn add(&mut self, sample: &Sample) {
+        if sample.flags & COLOR_VALID != 0 {
+            self.rgba |= mode((sample.rgba >> 24) as f32 / 255.0);
+        }
+        self.valid_value |= sample.flags & VALUE_VALID != 0;
+        self.missing_value |= sample.flags & VALUE_VALID == 0;
+        self.valid_category |= sample.flags & CATEGORY_VALID != 0;
+        self.missing_category |= sample.flags & CATEGORY_VALID == 0;
     }
 }
 

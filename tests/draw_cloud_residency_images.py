@@ -65,8 +65,8 @@ def verify(root):
     for capture, transition in zip(coarse, result["transitions"]):
         assert transition["sequence"] == capture["sequence"]
         assert transition["allocations"]["coarse_points"] == 12_288
-        assert transition["allocations"]["coarse_positions"] == 196_608
-        assert transition["allocations"]["coarse_attributes"] == 393_216
+        assert transition["allocations"]["coarse_positions"] == 12_288 * 12
+        assert transition["allocations"]["coarse_attributes"] == 0
         assert all(view["coarse"] and view["selected"] == 12_288 for view in transition["lod"])
     for full in result["stages"]:
         for view in full["lod"]:
@@ -91,8 +91,8 @@ def verify(root):
             shares.append(view["full_pages"])
         assert abs(shares[0] - shares[1]) <= 1, shares
         assert mixed["allocations"]["pages"] == sum(shares) + mixed["allocations"]["coarse_pages"], mixed
-        assert mixed["allocations"]["positions"] == sum(shares) * 65_536 * 16 + mixed["allocations"]["coarse_positions"], mixed
-        assert mixed["allocations"]["attributes"] == sum(shares) * 65_536 * 32 + mixed["allocations"]["coarse_attributes"], mixed
+        assert mixed["allocations"]["positions"] == sum(shares) * 65_536 * 12 + mixed["allocations"]["coarse_positions"], mixed
+        assert mixed["allocations"]["attributes"] == 0 and mixed["allocations"]["coarse_attributes"] == 0, mixed
         assert mixed["allocations"]["coarse_points"] == (96 - sum(shares)) * 256, mixed
         assert mixed["allocations"]["gpu_bytes"] <= result["limits"]["gpu_bytes"], mixed
     report = {"passed": "24 native residency, transition and divergent-view readbacks", "metrics": metrics}

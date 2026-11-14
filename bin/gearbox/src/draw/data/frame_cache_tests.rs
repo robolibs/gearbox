@@ -90,8 +90,8 @@ fn source_axis_pose_edits_rebuild_values_but_share_positions() {
         &first.pages[0].appearance,
         &second.pages[0].appearance
     ));
-    assert_eq!(first.pages[0].appearance.samples.values[0].value, 0.125);
-    assert_eq!(second.pages[0].appearance.samples.values[0].value, 0.375);
+    assert_eq!(first.pages[0].appearance.samples()[0].value, 0.125);
+    assert_eq!(second.pages[0].appearance.samples()[0].value, 0.375);
 }
 
 #[test]

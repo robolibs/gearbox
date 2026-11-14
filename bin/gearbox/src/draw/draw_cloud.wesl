@@ -1,5 +1,5 @@
 import bevy_pbr::render::mesh_view_bindings::{view, globals};
-import gearbox::draw::draw_cloud_types::{CloudPosition, CloudSample, CloudAge, cloud_project_point, cloud_radius_px, cloud_projected_edge, cloud_clip_accept, CLOUD_RADIUS_VALID};
+import gearbox::draw::draw_cloud_types::{CloudPosition, CloudSample, CloudAge, cloud_project_point, cloud_radius_px, cloud_projected_edge, cloud_clip_accept, CLOUD_ALL_VALID};
 import gearbox::draw::draw_cloud_color::{style, cloud_sample_color};
 import gearbox::draw::draw_common::{srgb_to_linear, display_to_scene, hud_sweep, hud_ladder, hud_iso_distance};
 import gearbox::draw::draw_frost::background_frost;
@@ -12,10 +12,13 @@ struct CloudPageUniform {
     age: CloudAge,
     // x: the radius in metres a point is drawn at least; 0 at full detail.
     coverage: vec4<f32>,
+    // x: attribute words per point, y: their colour kind, z: 1 when a radius word ends
+    // each point, w: the first validity word or CLOUD_ALL_VALID.
+    attributes: vec4<u32>,
 };
 @group(2) @binding(0) var<uniform> page: CloudPageUniform;
 @group(2) @binding(1) var<storage, read> positions: array<CloudPosition>;
-@group(2) @binding(2) var<storage, read> samples: array<CloudSample>;
+@group(2) @binding(2) var<storage, read> attributes: array<u32>;
 @if((CLOUD_SELECTED))
 @group(2) @binding(3) var<storage, read> selected_indices: array<u32>;
 @group(3) @binding(1) var lut_texture: texture_3d<f32>;
@@ -48,15 +51,25 @@ fn vertex(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) ins
     let ordinal = selected_indices[instance_index];
     @if((!(CLOUD_SELECTED)))
     let ordinal = instance_index;
-    let point = positions[ordinal];
-    let sample = samples[ordinal];
-    let world = page.world_from_local * vec4(point.xyz, 1.0);
+    let stored = positions[ordinal];
+    let local = vec3(stored.x, stored.y, stored.z);
+    let packing = page.attributes;
+    let base = ordinal * packing.x;
+    let colors = packing.x - packing.z;
+    var sample = CloudSample(packing.y, 1u, vec2(0u));
+    if colors > 0u { sample.words.x = attributes[base]; }
+    if colors > 1u { sample.words.y = attributes[base + 1u]; }
+    if packing.w != CLOUD_ALL_VALID { sample.valid = (attributes[packing.w + ordinal / 32u] >> (ordinal % 32u)) & 1u; }
+    let world = page.world_from_local * vec4(local, 1.0);
     let center = view.clip_from_world * world;
     var out: CloudOutput;
     let radius_bits = bitcast<u32>(style.effects.w);
     let pixels = (radius_bits & 0x80000000u) != 0u;
     var metric = select(style.effects.w, 0.0, pixels);
-    if (sample.flags & CLOUD_RADIUS_VALID) != 0u { metric = sample.radius_m; }
+    if packing.z != 0u {
+        let radius = bitcast<f32>(attributes[base + colors]);
+        if radius > 0.0 { metric = radius; }
+    }
     var pixel_radius = select(0.0, bitcast<f32>(radius_bits & 0x7fffffffu), pixels);
     // A coarse record grows to the spacing it stands for when that is larger.
     let projection_y = view.clip_from_view[1][1];
@@ -81,7 +94,7 @@ fn vertex(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) ins
     let contour = 1.0 - smoothstep(0.5 * band, band, hud_iso_distance(world.y + 0.5 * spacing, spacing));
     out.ping = vec3(ring, contour) * min(max(style.effects.y, 0.0) * 4.0, 1.0);
     if center.w <= 0.0 || center.z < 0.0 || center.z > center.w ||
-        !cloud_clip_accept(page.clip_rotation, page.clip_min, page.clip_max, point.xyz) {
+        !cloud_clip_accept(page.clip_rotation, page.clip_min, page.clip_max, local) {
         out.position = vec4(2.0, 2.0, 2.0, 1.0);
         out.rgba = vec4(0.0);
     }

@@ -16,13 +16,15 @@ fn age_uniform_layout_is_charged_per_page_not_per_point() {
         clip_max: Vec4::ZERO,
         age,
         coverage: Vec4::new(0.5, 0.0, 0.0, 0.0),
+        attributes: UVec4::new(2, 4, 0, 9),
     };
     let encoded = uniform_bytes(&page);
     assert_eq!(size_of::<AgeUniform>(), 48);
     assert_eq!(uniform_bytes(&age), bytemuck::bytes_of(&age));
-    assert_eq!(encoded.len(), 224);
+    assert_eq!(encoded.len(), 240);
     assert_eq!(&encoded[160..208], bytemuck::bytes_of(&age));
     assert_eq!(&encoded[208..212], 0.5f32.to_le_bytes());
+    assert_eq!(&encoded[224..240], bytemuck::cast_slice::<u32, u8>(&[2, 4, 0, 9]));
     assert_eq!(
         uniform_bytes(&Style::new(&Presentation::default())).len(),
         5184

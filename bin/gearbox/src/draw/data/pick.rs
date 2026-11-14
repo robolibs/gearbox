@@ -581,19 +581,19 @@ fn nearest(
                 continue;
             };
             let record = record as usize;
-            let (ordinal, xyz, sample) = match drawn.tier {
+            let (ordinal, xyz, attributes) = match drawn.tier {
                 Tier::Full => (
                     record as u32,
                     geometry.positions.values.get(record).map(|p| p.xyz),
-                    drawn.appearance.samples.values.get(record),
+                    &drawn.appearance.attributes,
                 ),
                 Tier::Coarse => (
                     geometry.coarse.ordinals.values.get(record).copied().unwrap_or(u32::MAX),
                     geometry.coarse.positions.values.get(record).map(|p| p.xyz),
-                    drawn.appearance.coarse.records.values.get(record),
+                    &drawn.appearance.coarse.attributes,
                 ),
             };
-            let (Some(xyz), Some(sample)) = (xyz, sample) else {
+            let Some(xyz) = xyz.filter(|_| attributes.contains(record)) else {
                 continue;
             };
             if !node.page.clip.accepts(geometry, ordinal) {
@@ -603,7 +603,7 @@ fn nearest(
             if clip.w <= 1e-6 {
                 continue;
             }
-            let metric = if sample.flags & super::appearance::RADIUS_VALID != 0 { sample.radius_m } else { metres };
+            let metric = attributes.radius_m(record).unwrap_or(metres);
             let radius = if metric > 0.0 { metric * 0.5 * size.y * projection_y / clip.w } else { pixels };
             let offset = clip.truncate().truncate() / clip.w * size * 0.5 - cursor;
             if offset.length() <= radius.max(0.5) + 0.5 && closest.is_none_or(|(w, ..)| clip.w < w) {
@@ -842,7 +842,7 @@ pub(super) fn leaf_key(config: &OctreeConfig, rebase_m: [f64; 3], center: [f32; 
 /// Every attribute but position and source ID at one render sample.
 fn attributes(shape: &DataShape, geometry: &super::cloud::Geometry, index: usize) -> Vec<(String, String, String)> {
     let (DataShape::Cloud { schema }, Some(source), Some(row)) =
-        (shape, geometry.source(), geometry.positions.values.get(index).map(|p| p.source_index as usize))
+        (shape, geometry.source(), geometry.source_row(index))
     else {
         return Vec::new();
     };

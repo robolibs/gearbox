@@ -3,6 +3,10 @@ use super::*;
 const PAGE: u32 = 65_536;
 const BANK: u32 = 48 * PAGE;
 const TOTAL: u32 = 2 * BANK;
+/// GPU bytes per point of a constant-colour cloud: its 12-byte position alone.
+const POINT_BYTES: u64 = 12;
+/// One bank fits the GPU budget and both banks together do not.
+const GPU_BYTES: u64 = 64 << 20;
 
 fn number(value: &serde_json::Value, field: &str) -> u64 {
     value[field].as_u64().expect("required residency counter")
@@ -152,14 +156,14 @@ pub(super) fn run(
     let limits = data.capabilities().limits.clone();
     let reference = DataLimits::reference();
     require(
-        limits.gpu_bytes == 256 << 20
+        limits.gpu_bytes == GPU_BYTES
             && limits.cpu_bytes == reference.cpu_bytes
             && limits.visible_points == reference.visible_points
             && limits.upload_bytes_per_frame == reference.upload_bytes_per_frame,
-        "residency requires reference limits with GEARBOX_DRAW_GPU_BYTES=256 MiB",
+        "residency requires reference limits with GEARBOX_DRAW_GPU_BYTES=64 MiB",
     )?;
     require(
-        u64::from(TOTAL) * 48 > limits.gpu_bytes,
+        u64::from(TOTAL) * POINT_BYTES > limits.gpu_bytes,
         "source fixture must exceed GPU capacity",
     )?;
     control.set("configure", true, 0)?;
@@ -416,7 +420,8 @@ fn residency_readiness_rejects_the_previous_camera_bank() {
 
 #[test]
 fn residency_banks_exceed_gpu_capacity_and_preserve_unique_page_source_identity() {
-    assert!(u64::from(TOTAL) * 48 > 256 << 20);
+    assert!(u64::from(TOTAL) * POINT_BYTES > GPU_BYTES);
+    assert!(u64::from(BANK) * POINT_BYTES < GPU_BYTES);
     for bank in 0..2 {
         for start in [0, BANK - PAGE] {
             let (descriptor, bytes) = fixture_page(bank, start).unwrap();

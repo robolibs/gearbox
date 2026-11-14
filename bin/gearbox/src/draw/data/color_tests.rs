@@ -77,7 +77,13 @@ pub(super) fn prepared(values: &[f64]) -> (CpuBudget, Arc<Appearance>) {
     (budget, appearance)
 }
 
+/// The colour of a stored value sample: its ramp position is the value word's 8.12 fixed point.
 pub(super) fn expected(style: &Style, sample: &Sample) -> [f32; 4] {
+    let at = (super::appearance::value_word(sample.value, 0) & 0xf_ffff) as f32 / 4096.0;
+    expected_at(style, sample, at)
+}
+
+pub(super) fn expected_at(style: &Style, sample: &Sample, at: f32) -> [f32; 4] {
     if sample.flags & VALUE_VALID == 0 {
         return style.missing.to_array();
     }
@@ -86,7 +92,6 @@ pub(super) fn expected(style: &Style, sample: &Sample) -> [f32; 4] {
             [((sample.palette_indices >> ((style.controls.y - 1) * 8)) & 255) as usize]
             .to_array();
     }
-    let at = sample.value.clamp(0.0, 1.0) * 255.0;
     let low = at.floor() as usize;
     style.ramp[low]
         .lerp(style.ramp[(low + 1).min(255)], at.fract())
@@ -252,7 +257,7 @@ fn attribute_preparation_applies_normalization_before_palette_indexing() {
         )
         .unwrap();
         assert_eq!(
-            appearance.samples.values[0].palette_indices, expected,
+            appearance.samples()[0].palette_indices, expected,
             "{scalar:?}/{normalization:?}"
         );
     }
@@ -263,8 +268,9 @@ fn attribute_preparation_applies_normalization_before_palette_indexing() {
 fn prepared_scalar_preserves_measurements_missing_values_and_raw_indices() {
     let values = [-1.0, 0.0, 99.0, 100.0, 255.0, 16_777_217.0, 1e300];
     let (budget, appearance) = prepared(&values);
+    let samples = appearance.samples();
     for (index, value) in values.into_iter().enumerate() {
-        let sample = appearance.samples.values[index];
+        let sample = samples[index];
         assert_eq!(sample.flags, VALUE_VALID);
         assert_eq!(sample.palette_indices, indices(value));
         let column = appearance.geometry.source().unwrap().column(2).unwrap();
@@ -277,8 +283,9 @@ fn prepared_scalar_preserves_measurements_missing_values_and_raw_indices() {
             Some(u64::MAX - index as u64)
         );
     }
-    assert_eq!(appearance.samples.values.last().unwrap().flags, 0);
-    assert_eq!(size_of::<Sample>(), 32);
+    assert_eq!(samples.last().unwrap().flags, 0);
+    assert_eq!(appearance.attributes.layout.stride(), 1);
+    assert_eq!(appearance.attributes.bytes().len(), samples.len() * 4 + 4);
     drop(appearance);
     assert_eq!(budget.usage().committed(), 0);
 }
@@ -289,10 +296,11 @@ fn indexed_lookup_matches_named_api_palettes_without_interpolation() {
         -9.5, -1.0, -0.5, 0.0, 0.5, 50.0, 98.5, 99.0, 100.0, 127.0, 128.0, 254.0, 255.0, 256.0,
     ];
     let (_, appearance) = prepared(&values);
+    let samples = appearance.samples();
     for map in MAPS {
         let style = Style::new(&presentation(map));
         for (index, value) in values.into_iter().enumerate() {
-            let sample = &appearance.samples.values[index];
+            let sample = &samples[index];
             if colormap::is_palette(map) {
                 let bytes = draw_geom::palette(map, value as f32);
                 assert_eq!(
@@ -311,7 +319,7 @@ fn indexed_lookup_matches_named_api_palettes_without_interpolation() {
             }
         }
         assert_eq!(
-            expected(&style, appearance.samples.values.last().unwrap()),
+            expected(&style, samples.last().unwrap()),
             style.missing.to_array()
         );
     }

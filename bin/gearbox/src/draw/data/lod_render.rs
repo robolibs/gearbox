@@ -124,6 +124,7 @@ pub(super) fn admission<'a>(
     for (key, _, entity) in &selected_nodes {
         let (_, _, node) = nodes.get(*entity).map_err(|_| Issue::Deferred)?;
         let geometry = &node.page.appearance.geometry;
+        let position = size_of::<super::super::cloud::Position>() as u64;
         let index = pages.len();
         styles
             .push(Arc::as_ptr(&node.dataset) as usize)
@@ -131,8 +132,12 @@ pub(super) fn admission<'a>(
         pages
             .push(residency::Page {
                 key: *key,
-                coarse_bytes: geometry.coarse.positions.values.len() as u64 * 48 + 512,
-                full_bytes: geometry.len() as u64 * 48 + 512,
+                coarse_bytes: geometry.coarse.positions.values.len() as u64 * position
+                    + node.page.appearance.coarse.attributes.layout.bytes()
+                    + 512,
+                full_bytes: geometry.len() as u64 * position
+                    + node.page.appearance.attributes.layout.bytes()
+                    + 512,
                 full: false,
             })
             .map_err(|_| Issue::CpuBudget)?;
@@ -1115,10 +1120,10 @@ impl Views {
                 .geometry
                 .get(&source.geometry)
                 .ok_or(Issue::Deferred)?;
-            let appearance = cache
-                .appearance
-                .get(&source.appearance)
-                .ok_or(Issue::Deferred)?;
+            let appearance = match &source.appearance {
+                Some(key) => cache.appearance.get(key).ok_or(Issue::Deferred)?,
+                None => geometry,
+            };
             page.group = Some(device.create_bind_group(
                 "selected cloud page",
                 &pipelines.get_bind_group_layout(&pipeline.page_selected),

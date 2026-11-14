@@ -117,14 +117,13 @@ fn appearance_charges_inline_metadata_and_releases_exactly() {
         &DataFrame::default(),
     )
     .unwrap();
+    assert_eq!(appearance.attributes.layout.stride(), 0);
     assert_eq!(
         budget.usage().committed() - before,
-        (size_of::<Appearance>()
-            + 2 * size_of::<usize>()
-            + size_of::<Sample>()
-            + size_of::<super::super::coarse::Samples>()
-            + 16
-            + size_of::<Sample>()) as u64
+        (size_of::<Appearance>() + 2 * size_of::<usize>() + size_of::<super::super::coarse::Samples>() + 16)
+            as u64
+            + appearance.attributes.layout.bytes()
+            + appearance.coarse.attributes.layout.bytes()
     );
     drop(appearance);
     assert_eq!(budget.usage().committed(), before);

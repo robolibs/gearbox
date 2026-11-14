@@ -27,9 +27,11 @@ struct StrokeParams {
 @group(constants::MATERIAL_BIND_GROUP) @binding(2) var lut_sampler: sampler;
 
 @if((DRAW_COMPACT_POINTS))
-struct CompactPointSample { rgba: u32, radius: f32, phase: f32, padding: f32 };
+struct CompactPointSample { rgba: u32, radius: f32, phase: f32 };
 @if((DRAW_COMPACT_POINTS))
-@group(2) @binding(0) var<storage, read> compact_positions: array<vec4<f32>>;
+struct CompactPointPosition { x: f32, y: f32, z: f32 };
+@if((DRAW_COMPACT_POINTS))
+@group(2) @binding(0) var<storage, read> compact_positions: array<CompactPointPosition>;
 @if((DRAW_COMPACT_POINTS))
 @group(2) @binding(1) var<storage, read> compact_samples: array<CompactPointSample>;
 
@@ -155,7 +157,8 @@ fn halo_px(radius: f32, glow: f32) -> f32 {
 @vertex
 fn vertex(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) instance_index: u32) -> VertexOutput {
     let corners = array<u32, 6>(0u, 1u, 3u, 0u, 3u, 2u);
-    let point = compact_positions[instance_index].xyz;
+    let stored = compact_positions[instance_index];
+    let point = vec3(stored.x, stored.y, stored.z);
     let sample = compact_samples[instance_index];
     var v: Vertex;
     v.a = point;

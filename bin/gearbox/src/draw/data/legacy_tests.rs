@@ -12,9 +12,9 @@ fn entity() -> DrawEntity {
 }
 
 #[test]
-fn compact_layout_has_two_sixteen_byte_records_and_no_indices() {
-    assert_eq!(size_of::<Position>(), 16);
-    assert_eq!(size_of::<Sample>(), 16);
+fn compact_layout_has_two_twelve_byte_records_and_no_indices() {
+    assert_eq!(size_of::<Position>(), 12);
+    assert_eq!(size_of::<Sample>(), 12);
     assert_eq!(std::mem::offset_of!(Sample, radius), 4);
     assert_eq!(std::mem::offset_of!(Sample, phase), 8);
     let budget = CpuBudget::new(1 << 20);

@@ -502,7 +502,7 @@ fn residency_demand_unions_active_pending_and_other_views_without_duplicates_in_
         .unwrap();
     assert_eq!(views.needed().collect::<BTreeSet<_>>(), [a, b, c].into());
     #[cfg(feature = "draw-probes")]
-    assert_eq!(views.demanded_position_bytes(), 1025 * 16);
+    assert_eq!(views.demanded_position_bytes(), 1025 * 12);
     assert!(views.needs(a) && views.needs(b) && views.needs(c));
     views.states.get_mut(&first).unwrap().active = None;
     assert!(!views.needs(a));

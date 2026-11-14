@@ -12,7 +12,6 @@ pub(super) const MAX_LOCAL_ERROR_M: f64 = 0.001;
 #[repr(C)]
 pub(super) struct Position {
     pub xyz: [f32; 3],
-    pub source_index: u32,
 }
 
 #[derive(Debug)]
@@ -61,6 +60,8 @@ pub(super) struct Geometry {
     descriptor: PageDescriptor,
     count: usize,
     pub positions: Records<Position>,
+    /// Source row of each render sample; empty when every source row is valid.
+    rows: Records<u32>,
     pub metadata: Arc<SpatialMetadata>,
     position_column: usize,
     source_id_column: usize,
@@ -70,6 +71,7 @@ pub(super) struct Geometry {
 
 struct Placement {
     positions: Records<Position>,
+    rows: Records<u32>,
     rebase_m: [f64; 3],
     bounds_m: Option<[[f64; 3]; 2]>,
     max_error_m: f64,
@@ -155,6 +157,7 @@ impl Geometry {
             descriptor: self.descriptor.clone(),
             count: self.count,
             positions: Records::new(budget, 0)?,
+            rows: Records::new(budget, 0)?,
             metadata: self.metadata.clone(),
             position_column: self.position_column,
             source_id_column: self.source_id_column,
@@ -177,6 +180,7 @@ impl Geometry {
             count: placement.positions.values.len(),
             source: Some(source),
             positions: placement.positions,
+            rows: placement.rows,
             metadata,
             position_column: placement.position_column,
             source_id_column: placement.source_id_column,
@@ -253,6 +257,8 @@ fn place(
             count += usize::from(valid(column, index));
         }
         let mut positions = Records::<Position>::new(budget, count)?;
+        let compacted = count != source.descriptor().items as usize;
+        let mut rows = Records::<u32>::new(budget, if compacted { count } else { 0 })?;
         let mut rebase_m = [0.0; 3];
         let mut bounds_m: Option<[[f64; 3]; 2]> = None;
         let mut max_error_m: f64 = 0.0;
@@ -292,14 +298,15 @@ fn place(
                 bounds[0][axis] = bounds[0][axis].min(point[axis]);
                 bounds[1][axis] = bounds[1][axis].max(point[axis]);
             }
-            positions.values[output] = Position {
-                xyz,
-                source_index: index as u32,
-            };
+            positions.values[output] = Position { xyz };
+            if compacted {
+                rows.values[output] = index as u32;
+            }
             output += 1;
         }
         Ok(Placement {
             positions,
+            rows,
             rebase_m,
             bounds_m,
             max_error_m,
@@ -311,13 +318,18 @@ fn place(
 }
 
 impl Geometry {
+    /// Source row of a render sample.
+    pub fn source_row(&self, index: usize) -> Option<usize> {
+        if index >= self.positions.values.len() {
+            return None;
+        }
+        Some(self.rows.values.get(index).map_or(index, |row| *row as usize))
+    }
+
     pub fn source_position(&self, index: usize) -> Result<[f64; 3], StorageError> {
         let source = self
-            .positions
-            .values
-            .get(index)
-            .ok_or_else(|| invalid("render sample is out of bounds"))?
-            .source_index as usize;
+            .source_row(index)
+            .ok_or_else(|| invalid("render sample is out of bounds"))?;
         position(
             self.source
                 .as_ref()
@@ -330,7 +342,7 @@ impl Geometry {
     }
 
     pub fn source_id(&self, index: usize) -> Option<u64> {
-        let source = self.positions.values.get(index)?.source_index as usize;
+        let source = self.source_row(index)?;
         let raw = self
             .source
             .as_ref()?

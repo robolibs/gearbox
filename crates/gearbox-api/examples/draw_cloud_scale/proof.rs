@@ -36,8 +36,8 @@ impl Allocations {
     fn million(&self) -> bool {
         self.points == 1_000_000
             && self.pages == 16
-            && self.positions == 16_000_000
-            && self.attributes == 32_000_000
+            && self.positions == 12_000_000
+            && self.attributes == 4_000_000
             && self.styles > 0
             && self.styles < 65_536
             && self.placements > 0

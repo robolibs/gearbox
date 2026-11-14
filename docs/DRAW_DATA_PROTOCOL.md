@@ -766,8 +766,8 @@ scene. The synthetic heightfield is a point cloud, not a reconstructed elevation
 
 `oslo make probe-draw-cloud-scale` enables the opt-in renderer observer and verifies
 actual live Buffer sizes, upload allowance, uniform-only presentation edits and exact
-clear/reload ownership. The default record buffers total 48,000,000 bytes for one
-million points; style/placement uniforms are separately measured at 8,512 bytes.
+clear/reload ownership. The default record buffers total 16,000,000 bytes for one
+million source-colored points; style/placement uniforms are separately measured.
 The observer's charged GPU usage includes in-flight staging/retirement; it does not
 measure total physical driver VRAM. Normal builds exclude this observer.
 
@@ -812,8 +812,8 @@ revalidate offset overflow for age attributes.
 
 The native viewer can draw eligible legacy POINTS without converting their public
 identity or payload to typed datasets. PLAIN, HAIRLINE, ORB, POINT_GLOW and SPLAT
-single-sprite styles use 16-byte position/source-index and 16-byte color/radius/phase
-records, plus a 128-byte entity uniform. Their original stroke shader remains the
+single-sprite styles use 12-byte position and 12-byte color/radius/phase records,
+plus a 128-byte entity uniform. Their original stroke shader remains the
 color, size, depth and visual-style authority. Position/attribute owners are reused
 when unchanged; color/radius edits do not require position uploads.
 
@@ -870,10 +870,16 @@ negative rounded values as unknown 255 and clamp large values to 255. RAW clamps
 integer index, even beyond f64's integer precision. Finite f64 indices use their own
 precision rather than a prior f32 conversion. Original retained values are unchanged.
 
-The compact attribute record stores both a continuous coordinate and packed palette
-indices in its existing 32 bytes; positions remain 16 bytes. Switching these maps
-changes only style uniforms and reuses geometry and attribute buffers. Axis/range
-colors use the same source-frame scalar semantics.
+Positions are 12-byte f32 local offsets; the source row of each point stays on the
+CPU. Attribute words hold only what the selected color mode reads: none for constant
+color, one RGBA word, one value word, one category word, or two acquisition-offset
+words for age, plus one f32 word when a radius attribute is selected. Value, category
+and age pages add one validity bit per point; an invalid RGBA sample is stored as zero.
+A value word keeps the ramp position in 8.12 fixed point (4,096 steps between
+neighbouring ramp entries), the raw palette byte, the Okabe slot and a below-zero flag.
+A source- or scalar-colored point therefore costs 16 bytes on the GPU. Switching
+these maps changes only style uniforms and reuses geometry and attribute buffers.
+Axis/range colors use the same source-frame scalar semantics.
 
 Age normalization uses a per-page integer nanosecond anchor and finite scale rather
 than an f32 timestamp or f32 age range. Source timestamps are subtracted as integers;
@@ -884,8 +890,8 @@ ordering around their possible in-window sample; equal ranges still select the m
 Indexed age maps use signed whole seconds, a nanosecond threshold and modulo-eight
 phase, preserving future-age and half-tie semantics without rounding a large f32 value.
 Changing age clock, range or palette does not reconstruct point buffers. Age uniforms
-cost 48 bytes within each 208-byte page uniform; the style uniform is 5,184 bytes.
-All are charged separately from the unchanged 48-byte point record.
+cost 48 bytes within each 240-byte page uniform; the style uniform is 5,184 bytes.
+All are charged separately from the per-point records.
 
 Source-age presentation references the maximum retained capture timestamp in the same
 named source clock and scene epoch. Unrelated clock names never advance one another.

@@ -37,11 +37,14 @@ fn case(
     };
     Case {
         input: Input {
-            sample: Sample {
-                acquisition_ns: [offset as u32, (offset >> 32) as u32],
-                flags: VALUE_VALID,
-                ..Default::default()
-            },
+            sample: packed(
+                &Selector::Age,
+                &Sample {
+                    acquisition_ns: [offset as u32, (offset >> 32) as u32],
+                    flags: VALUE_VALID,
+                    ..Default::default()
+                },
+            ),
             age: AgeUniform::new(
                 &ColorMode::Age {
                     clock,
@@ -206,7 +209,7 @@ fn gpu_age_normalization_and_indexed_palettes_preserve_extreme_and_cancelling_ti
         });
         let output = colors(device, queue, &pipeline, &style, &inputs);
         for (case, actual) in cases.iter().zip(output) {
-            let target = expected(
+            let target = expected_at(
                 &style,
                 &Sample {
                     value: case.coordinate,
@@ -214,6 +217,7 @@ fn gpu_age_normalization_and_indexed_palettes_preserve_extreme_and_cancelling_ti
                     flags: VALUE_VALID,
                     ..Default::default()
                 },
+                case.coordinate.clamp(0.0, 1.0) * 255.0,
             );
             for lane in 0..4 {
                 assert!(

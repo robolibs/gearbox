@@ -143,20 +143,68 @@ pub(super) fn add(
 }
 
 #[test]
-fn compact_record_offsets_have_a_48_byte_base_without_per_point_indices() {
-    assert_eq!(size_of::<Position>(), 16);
-    assert_eq!(std::mem::offset_of!(Position, source_index), 12);
-    assert_eq!(size_of::<Sample>(), 32);
-    assert_eq!(std::mem::offset_of!(Sample, value), 4);
-    assert_eq!(std::mem::offset_of!(Sample, category), 8);
-    assert_eq!(std::mem::offset_of!(Sample, radius_m), 12);
-    assert_eq!(std::mem::offset_of!(Sample, flags), 16);
-    assert_eq!(std::mem::offset_of!(Sample, acquisition_ns), 20);
-    assert_eq!(std::mem::offset_of!(Sample, palette_indices), 28);
-    assert_eq!(
-        (size_of::<Position>() + size_of::<Sample>()) * 1_000_000,
-        48_000_000
-    );
+fn compact_records_store_only_the_selected_colour_words() {
+    assert_eq!(size_of::<Position>(), 12);
+    let selectors = [
+        (Selector::Constant, 0),
+        (Selector::Attribute(name("rgba")), 4),
+        (Selector::Scalar(name("scalar"), [0.0, 1.0]), 4),
+        (Selector::Axis(2, [0.0, 1.0]), 4),
+        (Selector::Range([0.0; 3], [0.0, 1.0]), 4),
+        (Selector::Category(name("class")), 4),
+        (Selector::Age, 8),
+    ];
+    for (selector, bytes) in selectors {
+        for radius in [false, true] {
+            let layout = Layout::new(&selector, radius, 1_000_000);
+            let mask = if layout.mask { 1_000_000u64.div_ceil(32) * 4 } else { 0 };
+            assert_eq!(
+                layout.bytes(),
+                (bytes + 4 * u64::from(radius)) * 1_000_000 + mask,
+                "{selector:?} radius {radius}"
+            );
+            assert_eq!(layout.mask, bytes > 0 && !matches!(selector, Selector::Attribute(_)));
+        }
+    }
+}
+
+#[test]
+fn packed_words_round_trip_every_selector_validity_and_radius() {
+    let budget = CpuBudget::new(1 << 20);
+    let value = Sample {
+        value: 0.5,
+        palette_indices: 255 | 3 << 16,
+        flags: VALUE_VALID | RADIUS_VALID,
+        radius_m: 0.25,
+        ..Default::default()
+    };
+    let cases = [
+        (Selector::Attribute(name("rgba")), Sample { rgba: 0x7f50_1ec8, flags: COLOR_VALID, ..Default::default() }),
+        (Selector::Scalar(name("scalar"), [0.0, 1.0]), value),
+        (Selector::Category(name("class")), Sample { category: u32::MAX, flags: CATEGORY_VALID, ..Default::default() }),
+        (Selector::Age, Sample { acquisition_ns: [7, u32::MAX], flags: VALUE_VALID, ..Default::default() }),
+    ];
+    for (selector, sample) in cases {
+        let mut attributes = Attributes::new(&budget, Layout::new(&selector, true, 40)).unwrap();
+        attributes.set(33, &sample);
+        attributes.set(34, &Sample::default());
+        let expected = Sample { flags: sample.flags & !RADIUS_VALID, radius_m: 0.0, ..sample };
+        let radius = Sample { radius_m: 0.25, flags: expected.flags | RADIUS_VALID, ..expected };
+        let stored = if sample.flags & RADIUS_VALID != 0 { radius } else { expected };
+        assert_eq!(attributes.sample(33), Some(stored), "{selector:?}");
+        assert_eq!(attributes.sample(34), Some(Sample::default()), "{selector:?}");
+        assert_eq!(attributes.sample(40), None);
+        let coarse = attributes.gather(&budget, &[34, 33]).unwrap();
+        assert_eq!(coarse.sample(1), Some(stored));
+        assert_eq!(coarse.sample(0), Some(Sample::default()));
+    }
+    assert_eq!(super::appearance::value_parts(value_word(0.5, 255 | 3 << 16)), (0.5, 255 | 3 << 16));
+    assert_eq!(value_word(1.0, 0) & 0xf_ffff, 255 * 4096);
+    assert_eq!(budget.usage().committed(), 0);
+}
+
+fn name(value: &str) -> Name {
+    Name::new(value).unwrap()
 }
 
 #[test]
@@ -166,13 +214,8 @@ fn validity_compaction_preserves_exact_source_ids_and_original_ordinals() {
     let source = stored(&budget, &schema, &page, [0.0; 3]);
     let geometry = Geometry::prepare(&budget, &schema, source).unwrap();
     assert_eq!(
-        geometry
-            .positions
-            .values
-            .iter()
-            .map(|p| p.source_index)
-            .collect::<Vec<_>>(),
-        [0, 2]
+        (0..3).map(|i| geometry.source_row(i)).collect::<Vec<_>>(),
+        [Some(0), Some(2), None]
     );
     assert_eq!(geometry.source_id(0), Some(u64::MAX));
     assert_eq!(geometry.source_id(1), Some(u64::MAX - 2));
@@ -413,11 +456,11 @@ fn rgba_category_and_metric_radius_keep_validity_and_exact_integer_values() {
     )
     .unwrap();
     assert_eq!(
-        colors.samples.values[0].rgba.to_le_bytes(),
+        colors.samples()[0].rgba.to_le_bytes(),
         [200, 30, 80, 127]
     );
-    assert_eq!(colors.samples.values[0].flags, COLOR_VALID | RADIUS_VALID);
-    assert_eq!(colors.samples.values[1].flags, 0);
+    assert_eq!(colors.samples()[0].flags, COLOR_VALID | RADIUS_VALID);
+    assert_eq!(colors.samples()[1].flags, 0);
     presentation.color = ColorMode::Category {
         name: "class".into(),
         entries: vec![],
@@ -431,14 +474,14 @@ fn rgba_category_and_metric_radius_keep_validity_and_exact_integer_values() {
         &DataFrame::default(),
     )
     .unwrap();
-    assert_eq!(categories.samples.values[0].category, u32::MAX);
+    assert_eq!(categories.samples()[0].category, u32::MAX);
     assert_eq!(
-        categories.samples.values[0].flags,
+        categories.samples()[0].flags,
         CATEGORY_VALID | RADIUS_VALID
     );
-    assert_eq!(categories.samples.values[1].flags, 0);
+    assert_eq!(categories.samples()[1].flags, 0);
     assert!(Arc::ptr_eq(&colors.geometry, &categories.geometry));
-    assert_eq!(categories.samples.values[0].radius_m, 0.125);
+    assert_eq!(categories.samples()[0].radius_m, 0.125);
 }
 
 #[test]
@@ -469,14 +512,14 @@ fn axis_and_range_colors_use_source_pose_and_both_origins_once() {
         ..Default::default()
     };
     let a = Appearance::prepare(&budget, &schema, geometry.clone(), &p, &frame).unwrap();
-    assert!((a.samples.values[0].value - 0.5).abs() < 1e-6);
+    assert!((a.samples()[0].value - 0.5).abs() < 1e-6);
     p.color = ColorMode::Range {
         origin_m: [10.0, 20.0, 30.0],
         colormap: colormap::TURBO,
         range: [0.0, 12.0],
     };
     let b = Appearance::prepare(&budget, &schema, geometry, &p, &frame).unwrap();
-    assert!((b.samples.values[0].value - 0.5).abs() < 1e-6);
+    assert!((b.samples()[0].value - 0.5).abs() < 1e-6);
 }
 
 #[test]
@@ -494,7 +537,7 @@ fn prepared_ownership_is_charged_until_last_reader_and_budget_failure_is_atomic(
         &DataFrame::default(),
     )
     .unwrap();
-    assert!(budget.usage().scratch_bytes >= 8 * 48);
+    assert!(budget.usage().scratch_bytes >= 8 * size_of::<Position>() as u64);
     let before = budget.usage().committed();
     let full = budget.reserve(budget.usage().limit - before).unwrap();
     assert!(
@@ -561,8 +604,8 @@ fn acquisition_offsets_are_nullable_and_ambiguous_columns_are_explicit_errors() 
     let geometry =
         Geometry::prepare(&budget, &schema, stored(&budget, &schema, &page, [0.0; 3])).unwrap();
     let a = Appearance::prepare(&budget, &schema, geometry, &p, &frame).unwrap();
-    assert_eq!(a.samples.values[0].acquisition_ns, [500_000_000, 0]);
-    assert_eq!(a.samples.values[1].flags, 0);
+    assert_eq!(a.samples()[0].acquisition_ns, [500_000_000, 0]);
+    assert_eq!(a.samples()[1].flags, 0);
     add(
         &mut schema,
         &mut page,

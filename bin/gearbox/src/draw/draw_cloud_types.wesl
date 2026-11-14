@@ -1,22 +1,22 @@
-struct CloudPosition {
-    xyz: vec3<f32>,
-    source_index: u32,
-};
+struct CloudPosition { x: f32, y: f32, z: f32 };
 
-struct CloudSample {
-    rgba: u32,
-    value: f32,
-    category: u32,
-    radius_m: f32,
-    flags: u32,
-    acquisition_ns: array<u32, 2>,
-    palette_indices: u32,
-};
+// One point's colour words, their colour kind and whether they are valid.
+struct CloudSample { kind: u32, valid: u32, words: vec2<u32> };
 
-const CLOUD_COLOR_VALID: u32 = 1u;
-const CLOUD_VALUE_VALID: u32 = 2u;
-const CLOUD_CATEGORY_VALID: u32 = 4u;
-const CLOUD_RADIUS_VALID: u32 = 8u;
+// A page's first validity word when every point is valid.
+const CLOUD_ALL_VALID: u32 = 0xffffffffu;
+
+// Value words: ramp position in 8.12 fixed point (bits 0-19), raw palette byte (20-27),
+// Okabe slot (28-30), below zero (31).
+fn cloud_value_position(word: u32) -> f32 {
+    return f32(word & 0xfffffu) / 4096.0;
+}
+
+fn cloud_value_indices(word: u32) -> u32 {
+    let raw = (word >> 20u) & 255u;
+    let map = select(raw, 255u, (word >> 31u) != 0u);
+    return map | (raw << 8u) | (((word >> 28u) & 7u) << 16u);
+}
 
 struct CloudAge {
     anchor: vec4<u32>,

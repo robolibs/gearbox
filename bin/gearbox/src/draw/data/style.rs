@@ -101,6 +101,8 @@ pub(super) struct PageUniform {
     /// x: the radius in metres a point is drawn at least, so a page's sparse
     /// coarse records still cover it; 0 at full detail.
     pub coverage: Vec4,
+    /// Where the page's attribute words sit: see `appearance::Layout::uniform`.
+    pub attributes: UVec4,
 }
 
 #[cfg(test)]

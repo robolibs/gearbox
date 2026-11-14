@@ -23,7 +23,6 @@ struct Sample {
     rgba: u32,
     radius: f32,
     phase: f32,
-    padding: f32,
 }
 
 struct RecordBuffer<T> {
@@ -111,15 +110,9 @@ impl Points {
             Some(old) => old.positions.clone(),
             None => {
                 let mut records = RecordBuffer::new(budget, count)?;
-                for (index, (record, point)) in records
-                    .values
-                    .iter_mut()
-                    .zip(e.points.chunks_exact(3))
-                    .enumerate()
-                {
+                for (record, point) in records.values.iter_mut().zip(e.points.chunks_exact(3)) {
                     *record = Position {
                         xyz: [point[0], point[1], point[2]],
-                        source_index: index as u32,
                     };
                 }
                 Arc::new(records)
@@ -144,7 +137,6 @@ impl Points {
                 rgba: u32::from_le_bytes(rgba),
                 radius,
                 phase,
-                padding: 0.0,
             }
         };
         let samples = match old.filter(|old| {

@@ -85,7 +85,7 @@ def verify(directory):
     assert all(value["pixels"] <= 8 for value in cleared.values()), f"clear left a marker: {cleared}"
     stages = [json.loads((directory / f"{stage}.json").read_text()) for stage in STAGES]
     initial = stages[0]["metrics"]["uploads"]
-    assert initial["positions"] == 108 * 16 and initial["attributes"] == 108 * 32
+    assert initial["positions"] == 108 * 12 and initial["attributes"] == 0
     for i, stage in enumerate(stages):
         uploads = stage["metrics"]["uploads"]
         assert uploads["positions"] == initial["positions"] and uploads["attributes"] == initial["attributes"], "point records were reuploaded"

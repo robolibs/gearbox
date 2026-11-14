@@ -2,20 +2,55 @@ use wgpu::util::DeviceExt;
 
 use super::super::{
     age::AgeUniform,
-    appearance::{CATEGORY_VALID, COLOR_VALID, Sample, VALUE_VALID},
-    color_tests::{MAPS, expected, prepared, presentation},
+    appearance::{Attributes, CATEGORY_VALID, COLOR_VALID, Layout, Name, Sample, Selector, VALUE_VALID},
+    color_tests::{MAPS, expected, expected_at, prepared, presentation},
     style::{Style, uniform_bytes},
 };
+use gearbox_api::draw_data::CpuBudget;
 use gearbox_api::wire::draw_data::*;
 
 #[path = "age_gpu_tests.rs"]
 mod age;
 
+/// `CloudSample` as the cloud vertex shader assembles it from a page's attribute words.
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct GpuSample {
+    kind: u32,
+    valid: u32,
+    words: [u32; 2],
+}
+
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct Input {
-    sample: Sample,
+    sample: GpuSample,
     age: AgeUniform,
+}
+
+/// Reads every point back the way `draw_cloud.wesl`'s vertex stage does.
+fn shader_samples(attributes: &Attributes) -> Vec<GpuSample> {
+    let packing = attributes.layout.uniform();
+    let words = &attributes.words.values;
+    let colors = attributes.layout.colors as usize;
+    (0..attributes.layout.count)
+        .map(|index| {
+            let base = index * packing.x as usize;
+            let mut sample = GpuSample { kind: packing.y, valid: 1, words: [0; 2] };
+            sample.words[..colors].copy_from_slice(&words[base..base + colors]);
+            if packing.w != u32::MAX {
+                sample.valid = words[packing.w as usize + index / 32] >> (index % 32) & 1;
+            }
+            sample
+        })
+        .collect()
+}
+
+fn packed(selector: &Selector, sample: &Sample) -> GpuSample {
+    let budget = CpuBudget::new(1 << 10);
+    let mut attributes = Attributes::new(&budget, Layout::new(selector, false, 1)).unwrap();
+    attributes.set(0, sample);
+    shader_samples(&attributes)[0]
 }
 
 fn colors(
@@ -84,8 +119,7 @@ fn colors(
         bytemuck::cast_slice(&readback.slice(..).get_mapped_range().expect("mapped GPU buffer range")).to_vec();
     readback.unmap();
     for (item, pair) in input.iter().zip(result.chunks_exact(2)) {
-        let ns = u64::from(item.sample.acquisition_ns[0])
-            | (u64::from(item.sample.acquisition_ns[1]) << 32);
+        let ns = u64::from(item.sample.words[0]) | (u64::from(item.sample.words[1]) << 32);
         let seconds = ns / 1_000_000_000;
         assert_eq!(
             &pair[1][..3],
@@ -131,7 +165,7 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= arrayLength(&inputs) { return; }
     let item = inputs[id.x];
     output[id.x * 2u] = bitcast<vec4<u32>>(cloud_sample_color(item.sample, item.age));
-    let ns = vec2(item.sample.acquisition_ns[0], item.sample.acquisition_ns[1]);
+    let ns = item.sample.words;
     output[id.x * 2u + 1u] = vec4(cloud_seconds_parts(ns), bitcast<u32>(cloud_seconds(ns)));
 }
 "#
@@ -168,12 +202,11 @@ fn gpu_production_color_selector_preserves_all_maps_raw_indices_missing_rgba_and
         9_007_199_254_740_991.0,
     ]);
     let (budget, appearance) = prepared(&values);
-    let input: Vec<_> = appearance
-        .samples
-        .values
-        .iter()
+    let samples = appearance.samples();
+    let input: Vec<_> = shader_samples(&appearance.attributes)
+        .into_iter()
         .map(|sample| Input {
-            sample: *sample,
+            sample,
             ..Default::default()
         })
         .collect();
@@ -183,7 +216,7 @@ fn gpu_production_color_selector_preserves_all_maps_raw_indices_missing_rgba_and
         let style = Style::new(&p);
         let output = colors(device, queue, &pipeline, &style, &input);
         for (index, actual) in output.iter().enumerate() {
-            let expected = expected(&style, &input[index].sample);
+            let expected = expected(&style, &samples[index]);
             for lane in 0..4 {
                 assert!(
                     (actual[lane] - expected[lane]).abs() <= 2e-7,
@@ -209,11 +242,14 @@ fn gpu_production_color_selector_preserves_all_maps_raw_indices_missing_rgba_and
                     let now = (1_000_000_000_000i64 + (f64::from(*age) * 1e9) as i64) as u64;
                     let capture = 999_000_000_000u64;
                     Input {
-                        sample: Sample {
-                            flags: VALUE_VALID,
-                            acquisition_ns: [1_000_000_000, 0],
-                            ..Default::default()
-                        },
+                        sample: packed(
+                            &Selector::Age,
+                            &Sample {
+                                flags: VALUE_VALID,
+                                acquisition_ns: [1_000_000_000, 0],
+                                ..Default::default()
+                            },
+                        ),
                         age: AgeUniform::new(
                             &age_presentation.color,
                             Some(&CaptureStamp {
@@ -240,7 +276,7 @@ fn gpu_production_color_selector_preserves_all_maps_raw_indices_missing_rgba_and
                     palette_indices: super::super::palette::indices(f64::from(age)),
                     ..Default::default()
                 };
-                let expected = expected(&style, &sample);
+                let expected = expected_at(&style, &sample, sample.value.clamp(0.0, 1.0) * 255.0);
                 for lane in 0..4 {
                     assert!(
                         (output[index][lane] - expected[lane]).abs() <= 2e-6,
@@ -259,20 +295,26 @@ fn gpu_production_color_selector_preserves_all_maps_raw_indices_missing_rgba_and
         category: u32::MAX,
         ..Default::default()
     };
-    for color in [
-        ColorMode::Constant { rgba },
-        ColorMode::Attribute {
-            name: "rgba".into(),
-            space: ColorSpace::Srgb,
-        },
-        ColorMode::Category {
-            name: "class".into(),
-            entries: vec![PaletteEntry {
-                value: u32::MAX,
-                rgba,
-            }],
-            missing: [3; 4],
-        },
+    for (selector, color) in [
+        (Selector::Constant, ColorMode::Constant { rgba }),
+        (
+            Selector::Attribute(Name::new("rgba").unwrap()),
+            ColorMode::Attribute {
+                name: "rgba".into(),
+                space: ColorSpace::Srgb,
+            },
+        ),
+        (
+            Selector::Category(Name::new("class").unwrap()),
+            ColorMode::Category {
+                name: "class".into(),
+                entries: vec![PaletteEntry {
+                    value: u32::MAX,
+                    rgba,
+                }],
+                missing: [3; 4],
+            },
+        ),
     ] {
         let style = Style::new(&Presentation {
             color,
@@ -284,7 +326,7 @@ fn gpu_production_color_selector_preserves_all_maps_raw_indices_missing_rgba_and
             &pipeline,
             &style,
             &[Input {
-                sample,
+                sample: packed(&selector, &sample),
                 ..Default::default()
             }],
         );
@@ -318,10 +360,13 @@ fn gpu_production_color_selector_preserves_all_maps_raw_indices_missing_rgba_and
     let inputs: Vec<_> = offsets
         .iter()
         .map(|ns| Input {
-            sample: Sample {
-                acquisition_ns: [*ns as u32, (*ns >> 32) as u32],
-                ..Default::default()
-            },
+            sample: packed(
+                &Selector::Age,
+                &Sample {
+                    acquisition_ns: [*ns as u32, (*ns >> 32) as u32],
+                    ..Default::default()
+                },
+            ),
             ..Default::default()
         })
         .collect();
@@ -334,7 +379,7 @@ fn gpu_production_color_selector_preserves_all_maps_raw_indices_missing_rgba_and
     );
     assert_eq!(output.len(), offsets.len());
     println!(
-        "{{\"production_color_cases\":{cases},\"maps\":9,\"integer_time_cases\":{},\"base_sample_bytes\":32}}",
+        "{{\"production_color_cases\":{cases},\"maps\":9,\"integer_time_cases\":{},\"value_sample_bytes\":4}}",
         offsets.len()
     );
 }

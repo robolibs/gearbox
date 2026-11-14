@@ -72,9 +72,9 @@ impl Owner {
     fn bytes(&self) -> &[u8] {
         match self {
             Self::Geometry(value) => bytemuck::cast_slice(&value.positions.values),
-            Self::Appearance(value) => bytemuck::cast_slice(&value.samples.values),
+            Self::Appearance(value) => value.attributes.bytes(),
             Self::CoarseGeometry(value) => bytemuck::cast_slice(&value.coarse.positions.values),
-            Self::CoarseAppearance(value) => bytemuck::cast_slice(&value.records.values),
+            Self::CoarseAppearance(value) => value.attributes.bytes(),
         }
     }
 }
@@ -95,7 +95,8 @@ struct PageBuffer {
     previous: List<u8>,
     group: BindGroup,
     geometry: (usize, Tier),
-    appearance: (usize, Tier),
+    /// None when the page has no attribute words and binds its positions in their place.
+    appearance: Option<(usize, Tier)>,
     style: usize,
     count: u32,
 }
@@ -540,7 +541,16 @@ impl Prepare<'_, '_> {
         let geometry = (Arc::as_ptr(&node.page.appearance.geometry) as usize, tier);
         let appearance = (Arc::as_ptr(&node.page.appearance) as usize, tier);
         let style = Arc::as_ptr(&node.dataset) as usize;
+        let layout = match tier {
+            Tier::Full => node.page.appearance.attributes.layout,
+            Tier::Coarse => node.page.appearance.coarse.attributes.layout,
+        };
+        // Pages without attribute words bind their positions in the unread attribute slot.
+        let attributes_bound = layout.words() > 0;
         for kind in 0..2 {
+            if kind == 1 && !attributes_bound {
+                continue;
+            }
             let (key, owner) = if kind == 0 {
                 (
                     geometry,
@@ -694,10 +704,14 @@ impl Prepare<'_, '_> {
             .geometry
             .get(&geometry)
             .filter(|storage| storage.written == storage.owner.bytes().len() as u64);
-        let appearance_buffer = cache
-            .appearance
-            .get(&appearance)
-            .filter(|storage| storage.written == storage.owner.bytes().len() as u64);
+        let appearance_buffer = if attributes_bound {
+            cache
+                .appearance
+                .get(&appearance)
+                .filter(|storage| storage.written == storage.owner.bytes().len() as u64)
+        } else {
+            geometry_buffer
+        };
         let (Some(geometry_buffer), Some(appearance_buffer)) = (geometry_buffer, appearance_buffer)
         else {
             return Err(Issue::Deferred);
@@ -730,6 +744,7 @@ impl Prepare<'_, '_> {
             clip_max: node.page.clip.max,
             age,
             coverage: Vec4::new(coverage, 0.0, 0.0, 0.0),
+            attributes: layout.uniform(),
         };
         let bytes = owned_uniform(budget, &value).map_err(|_| Issue::CpuBudget)?;
         if !cache.pages.contains_key(&page_key) {
@@ -764,7 +779,7 @@ impl Prepare<'_, '_> {
                         previous: List::default(),
                         group,
                         geometry,
-                        appearance,
+                        appearance: attributes_bound.then_some(appearance),
                         style,
                         count: match tier {
                             Tier::Full => node.page.appearance.geometry.positions.values.len(),

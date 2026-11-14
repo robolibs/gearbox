@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bevy::math::{DQuat, DVec3};
+use bevy::math::{DQuat, DVec3, UVec4};
 use gearbox_api::draw_data::{Charge, CpuBudget, MemoryClass, StorageError};
 use gearbox_api::wire::draw_data::*;
 
@@ -11,8 +11,8 @@ pub(super) const VALUE_VALID: u32 = 2;
 pub(super) const CATEGORY_VALID: u32 = 4;
 pub(super) const RADIUS_VALID: u32 = 8;
 
-#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
-#[repr(C)]
+/// One point's attributes before packing.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct Sample {
     pub rgba: u32,
     pub value: f32,
@@ -23,6 +23,205 @@ pub(super) struct Sample {
     pub palette_indices: u32,
 }
 
+/// Colour kinds, numbered as the style's `controls.x`.
+pub(super) const KIND_RGBA: u32 = 1;
+pub(super) const KIND_VALUE: u32 = 2;
+pub(super) const KIND_CATEGORY: u32 = 3;
+pub(super) const KIND_AGE: u32 = 4;
+
+/// Ramp positions in 8.12 fixed point: 4096 steps between neighbouring ramp entries.
+const RAMP_STEPS: f64 = 4096.0;
+const RAMP_POSITION_BITS: u32 = 0xf_ffff;
+
+/// Packs a display coordinate in [0, 1] and its palette indices into one value word:
+/// ramp position (bits 0-19), raw palette byte (20-27), Okabe slot (28-30), below zero (31).
+pub(super) fn value_word(value: f32, indices: u32) -> u32 {
+    let position = (f64::from(value.clamp(0.0, 1.0)) * 255.0 * RAMP_STEPS).round() as u32;
+    let raw = (indices >> 8) & 255;
+    let below = u32::from(indices & 255 != raw);
+    position | raw << 20 | ((indices >> 16) & 7) << 28 | below << 31
+}
+
+/// The display coordinate and `map | raw << 8 | okabe << 16` indices of a value word.
+pub(super) fn value_parts(word: u32) -> (f32, u32) {
+    let raw = (word >> 20) & 255;
+    let map = if word >> 31 != 0 { 255 } else { raw };
+    let value = (f64::from(word & RAMP_POSITION_BITS) / (255.0 * RAMP_STEPS)) as f32;
+    (value, map | raw << 8 | ((word >> 28) & 7) << 16)
+}
+
+/// Where one appearance's points keep their attribute words.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Layout {
+    pub count: usize,
+    pub kind: u32,
+    /// Colour words per point; the radius word follows them when stored.
+    pub colors: u32,
+    pub radius: bool,
+    /// One validity bit per point after the point words.
+    pub mask: bool,
+}
+
+impl Layout {
+    pub fn new(selector: &Selector, radius: bool, count: usize) -> Self {
+        let (kind, colors) = match selector {
+            Selector::Constant => (0, 0),
+            Selector::Attribute(_) => (KIND_RGBA, 1),
+            Selector::Scalar(..) | Selector::Axis(..) | Selector::Range(..) => (KIND_VALUE, 1),
+            Selector::Category(_) => (KIND_CATEGORY, 1),
+            Selector::Age => (KIND_AGE, 2),
+        };
+        Self { count, kind, colors, radius, mask: colors > 0 && kind != KIND_RGBA }
+    }
+
+    pub fn stride(self) -> usize {
+        (self.colors + u32::from(self.radius)) as usize
+    }
+
+    fn mask_start(self) -> Option<usize> {
+        self.mask.then(|| self.count * self.stride())
+    }
+
+    pub fn words(self) -> usize {
+        self.count * self.stride() + if self.mask { self.count.div_ceil(32) } else { 0 }
+    }
+
+    pub fn bytes(self) -> u64 {
+        self.words() as u64 * 4
+    }
+
+    /// x: words per point, y: colour kind, z: 1 when a radius word ends each point,
+    /// w: the first validity word, or `u32::MAX` when every point is valid.
+    pub fn uniform(self) -> UVec4 {
+        let mask = self.mask_start().map_or(u32::MAX, |start| start as u32);
+        UVec4::new(self.stride() as u32, self.kind, u32::from(self.radius), mask)
+    }
+}
+
+/// Packed per-point attribute words, uploaded to the cloud shader as they are.
+#[derive(Debug)]
+pub(super) struct Attributes {
+    pub layout: Layout,
+    pub words: Records<u32>,
+}
+
+impl Attributes {
+    pub fn new(budget: &CpuBudget, layout: Layout) -> Result<Self, StorageError> {
+        Ok(Self { layout, words: Records::new(budget, layout.words())? })
+    }
+
+    /// Keeps the layout of a hollow page without its words.
+    pub fn hollow(&self, budget: &CpuBudget) -> Result<Self, StorageError> {
+        Ok(Self { layout: self.layout, words: Records::new(budget, 0)? })
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        bytemuck::cast_slice(&self.words.values)
+    }
+
+    pub fn contains(&self, index: usize) -> bool {
+        index < self.layout.count && self.words.values.len() == self.layout.words()
+    }
+
+    pub fn set(&mut self, index: usize, sample: &Sample) {
+        let layout = self.layout;
+        let base = index * layout.stride();
+        let words = &mut self.words.values;
+        let valid = match layout.kind {
+            KIND_RGBA => {
+                words[base] = if sample.flags & COLOR_VALID != 0 { sample.rgba } else { 0 };
+                true
+            }
+            KIND_VALUE => {
+                words[base] = value_word(sample.value, sample.palette_indices);
+                sample.flags & VALUE_VALID != 0
+            }
+            KIND_CATEGORY => {
+                words[base] = sample.category;
+                sample.flags & CATEGORY_VALID != 0
+            }
+            KIND_AGE => {
+                words[base..base + 2].copy_from_slice(&sample.acquisition_ns);
+                sample.flags & VALUE_VALID != 0
+            }
+            _ => true,
+        };
+        if layout.radius && sample.flags & RADIUS_VALID != 0 {
+            words[base + layout.colors as usize] = sample.radius_m.to_bits();
+        }
+        if let Some(start) = layout.mask_start()
+            && valid
+        {
+            words[start + index / 32] |= 1 << (index % 32);
+        }
+    }
+
+    pub fn radius_m(&self, index: usize) -> Option<f32> {
+        if !self.layout.radius {
+            return None;
+        }
+        let word = self.words.values.get(index * self.layout.stride() + self.layout.colors as usize)?;
+        (*word != 0).then(|| f32::from_bits(*word))
+    }
+
+    /// The sample as the shader reads it back; invalid fields read as zero.
+    pub fn sample(&self, index: usize) -> Option<Sample> {
+        if !self.contains(index) {
+            return None;
+        }
+        let layout = self.layout;
+        let words = &self.words.values[index * layout.stride()..(index + 1) * layout.stride()];
+        let valid = layout
+            .mask_start()
+            .is_none_or(|start| self.words.values[start + index / 32] >> (index % 32) & 1 != 0);
+        let mut sample = Sample::default();
+        match layout.kind {
+            KIND_RGBA if words[0] != 0 => {
+                sample.rgba = words[0];
+                sample.flags |= COLOR_VALID;
+            }
+            KIND_VALUE if valid => {
+                (sample.value, sample.palette_indices) = value_parts(words[0]);
+                sample.flags |= VALUE_VALID;
+            }
+            KIND_CATEGORY if valid => {
+                sample.category = words[0];
+                sample.flags |= CATEGORY_VALID;
+            }
+            KIND_AGE if valid => {
+                sample.acquisition_ns = [words[0], words[1]];
+                sample.flags |= VALUE_VALID;
+            }
+            _ => {}
+        }
+        if let Some(radius) = self.radius_m(index) {
+            sample.radius_m = radius;
+            sample.flags |= RADIUS_VALID;
+        }
+        Some(sample)
+    }
+
+    /// The words of the samples at `ordinals`, in that order.
+    pub fn gather(&self, budget: &CpuBudget, ordinals: &[u32]) -> Result<Self, StorageError> {
+        let mut result = Self::new(budget, Layout { count: ordinals.len(), ..self.layout })?;
+        let stride = self.layout.stride();
+        let masks = self.layout.mask_start().zip(result.layout.mask_start());
+        for (index, ordinal) in ordinals.iter().map(|o| *o as usize).enumerate() {
+            if !self.contains(ordinal) {
+                return Err(invalid("coarse attribute outside source page"));
+            }
+            result.words.values[index * stride..(index + 1) * stride]
+                .copy_from_slice(&self.words.values[ordinal * stride..(ordinal + 1) * stride]);
+            if let Some((from, to)) = masks
+                && self.words.values[from + ordinal / 32] >> (ordinal % 32) & 1 != 0
+            {
+                result.words.values[to + index / 32] |= 1 << (index % 32);
+            }
+        }
+        Ok(result)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Name {
     bytes: [u8; MAX_ATTRIBUTE_NAME_BYTES],
@@ -30,7 +229,7 @@ pub(super) struct Name {
 }
 
 impl Name {
-    fn new(value: &str) -> Result<Self, StorageError> {
+    pub(super) fn new(value: &str) -> Result<Self, StorageError> {
         if value.is_empty()
             || value.len() > MAX_ATTRIBUTE_NAME_BYTES
             || value.chars().any(char::is_control)
@@ -112,7 +311,7 @@ impl AppearanceKey {
 
 pub(super) struct Appearance {
     pub key: AppearanceKey,
-    pub samples: Records<Sample>,
+    pub attributes: Attributes,
     pub coarse: Arc<super::coarse::Samples>,
     pub geometry: Arc<Geometry>,
     pub alpha: super::alpha::Summary,
@@ -121,6 +320,11 @@ pub(super) struct Appearance {
 }
 
 impl Appearance {
+    #[cfg(test)]
+    pub fn samples(&self) -> Vec<Sample> {
+        (0..self.attributes.layout.count).filter_map(|i| self.attributes.sample(i)).collect()
+    }
+
     /// Keeps style identity and coarse samples for a hollow page, without full samples.
     pub fn hollow(
         &self,
@@ -130,7 +334,7 @@ impl Appearance {
         let bytes = (size_of::<Self>() + 2 * size_of::<usize>()) as u64;
         Ok(Arc::new(Self {
             key: self.key.clone(),
-            samples: Records::new(budget, 0)?,
+            attributes: self.attributes.hollow(budget)?,
             coarse: self.coarse.clone(),
             geometry,
             alpha: self.alpha,
@@ -196,14 +400,21 @@ impl Appearance {
         let charge = budget
             .reserve(bytes)?
             .charge(bytes, MemoryClass::Metadata)?;
-        let mut samples = Records::<Sample>::new(budget, geometry.positions.values.len())?;
+        let count = geometry.positions.values.len();
+        let layout = Layout::new(&key.selector, radius.is_some(), count);
+        let mut attributes = Attributes::new(budget, layout)?;
+        let mut alpha = super::alpha::Summary::default();
+        let mut max_radius_m = 0.0f32;
         let rotation = frame.pose.rotation_wxyz;
         let rotation = DQuat::from_xyzw(rotation[1], rotation[2], rotation[3], rotation[0]);
         let translation = DVec3::from_array(frame.pose.translation_m);
         let origin =
             DVec3::from_array(frame.origin_m) + DVec3::from_array(geometry.descriptor().origin_m);
-        for (render_index, sample) in samples.values.iter_mut().enumerate() {
-            let index = geometry.positions.values[render_index].source_index as usize;
+        for render_index in 0..count {
+            let mut sample = Sample::default();
+            let index = geometry
+                .source_row(render_index)
+                .ok_or_else(|| invalid("render sample is out of bounds"))?;
             if let Some((attribute, column)) = radius
                 && let Some(value) = normalized(column, attribute, index)?
             {
@@ -266,35 +477,31 @@ impl Appearance {
                 }
                 Selector::Age => {
                     let offset_ns = match time {
-                        Some((_, column)) => match exact_u64(column, index)? {
-                            Some(value) => {
-                                if let Some(capture) = &frame.capture
-                                    && capture.source_time_ns.is_some()
-                                {
-                                    capture.source_sample_ns(value).map_err(invalid)?;
-                                }
-                                value
-                            }
-                            None => continue,
-                        },
-                        None => 0,
+                        Some((_, column)) => exact_u64(column, index)?,
+                        None => Some(0),
                     };
-                    sample.acquisition_ns = [offset_ns as u32, (offset_ns >> 32) as u32];
-                    sample.flags |= VALUE_VALID;
+                    if let Some(offset_ns) = offset_ns {
+                        if time.is_some()
+                            && let Some(capture) = &frame.capture
+                            && capture.source_time_ns.is_some()
+                        {
+                            capture.source_sample_ns(offset_ns).map_err(invalid)?;
+                        }
+                        sample.acquisition_ns = [offset_ns as u32, (offset_ns >> 32) as u32];
+                        sample.flags |= VALUE_VALID;
+                    }
                 }
             }
+            attributes.set(render_index, &sample);
+            alpha.add(&sample);
+            if sample.flags & RADIUS_VALID != 0 {
+                max_radius_m = max_radius_m.max(sample.radius_m);
+            }
         }
-        let alpha = super::alpha::Summary::new(&samples.values);
-        let max_radius_m = samples
-            .values
-            .iter()
-            .filter(|sample| sample.flags & RADIUS_VALID != 0)
-            .map(|sample| sample.radius_m)
-            .fold(0.0, f32::max);
         Ok(Arc::new(Self {
             key,
-            coarse: super::coarse::Samples::build(budget, &geometry.coarse, &samples.values)?,
-            samples,
+            coarse: super::coarse::Samples::build(budget, &geometry.coarse, &attributes)?,
+            attributes,
             geometry,
             alpha,
             max_radius_m,

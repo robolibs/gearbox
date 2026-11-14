@@ -1,4 +1,4 @@
-use super::appearance::Sample;
+use super::appearance::{Attributes, KIND_AGE, Layout, RADIUS_VALID, Sample, Selector, VALUE_VALID};
 use super::cloud::Position;
 
 #[path = "color_gpu_tests.rs"]
@@ -202,23 +202,32 @@ fn gpu_compact_records_match_wgsl_offsets_in_actual_million_sample_allocations()
     let engine = molla_compute::Engine::new_gpu().unwrap();
     let device = engine.device().unwrap();
     let queue = engine.queue().unwrap();
-    let count = 1_000_000u64;
+    use wgpu::util::DeviceExt;
+    let count = 1_000_000usize;
+    let budget = gearbox_api::draw_data::CpuBudget::new(64 << 20);
+    let layout = Layout::new(&Selector::Age, true, count);
+    let mut attributes = Attributes::new(&budget, layout).unwrap();
     let position = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("cloud position records"),
-        size: count * size_of::<Position>() as u64,
+        size: (count * size_of::<Position>()) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let samples = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("cloud attribute records"),
-        size: count * size_of::<Sample>() as u64,
+        size: layout.bytes(),
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    assert_eq!(position.size() + samples.size(), 48_000_000);
+    assert_eq!(position.size() + samples.size(), 24_125_000);
+    let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("cloud layout uniform"),
+        contents: bytemuck::cast_slice(&layout.uniform().to_array()),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
     let output = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("cloud layout output"),
-        size: 208,
+        size: 144,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
@@ -228,27 +237,37 @@ fn gpu_compact_records_match_wgsl_offsets_in_actual_million_sample_allocations()
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let mut expected = Vec::new();
-    for (row, index) in [0u64, 1, 65_535, 999_999].into_iter().enumerate() {
+    let mut expected = Vec::<u32>::new();
+    let rows = [0usize, 1, 65_535, 999_999];
+    for (row, index) in rows.into_iter().enumerate() {
         let point = Position {
             xyz: [row as f32 + 0.125, -2.5, 0.75],
-            source_index: 65_535 - row as u32,
         };
-        let sample = Sample {
-            rgba: 0xfedcba98 - row as u32,
-            value: -0.125 * row as f32,
-            category: u32::MAX - row as u32,
-            radius_m: 0.0625,
-            flags: 15,
-            acquisition_ns: [17, 23],
-            palette_indices: 29,
-        };
-        queue.write_buffer(&position, index * 16, bytemuck::bytes_of(&point));
-        queue.write_buffer(&samples, index * 32, bytemuck::bytes_of(&sample));
-        expected.extend_from_slice(bytemuck::bytes_of(&point));
-        expected.extend_from_slice(bytemuck::bytes_of(&sample));
+        attributes.set(
+            index,
+            &Sample {
+                radius_m: 0.0625,
+                flags: if row % 2 == 0 { VALUE_VALID | RADIUS_VALID } else { 0 },
+                acquisition_ns: [17 + row as u32, u32::MAX - row as u32],
+                ..Default::default()
+            },
+        );
+        queue.write_buffer(&position, (index * size_of::<Position>()) as u64, bytemuck::bytes_of(&point));
+        expected.extend(point.xyz.map(f32::to_bits));
     }
-    expected.extend_from_slice(bytemuck::cast_slice(&[1.0f32, 0.0, -1.0, 1.0]));
+    queue.write_buffer(&samples, 0, attributes.bytes());
+    let mask = layout.uniform().w as usize;
+    let mut fields = Vec::new();
+    for (row, index) in rows.into_iter().enumerate() {
+        let words = &attributes.words.values[index * 3..index * 3 + 3];
+        let valid = attributes.words.values[mask + index / 32] >> (index % 32) & 1;
+        assert_eq!(valid, u32::from(row % 2 == 0));
+        assert_eq!(attributes.sample(index).unwrap().flags & VALUE_VALID != 0, valid != 0);
+        fields.extend(expected[row * 3..row * 3 + 3].iter().copied());
+        fields.extend([KIND_AGE, valid, words[0], words[1], words[2]]);
+    }
+    fields.extend([1.0f32, 0.0, -1.0, 1.0].map(f32::to_bits));
+    let expected: Vec<u8> = bytemuck::cast_slice(&fields).to_vec();
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("cloud layout probe"),
         source: wgpu::ShaderSource::Wgsl(
@@ -257,21 +276,28 @@ fn gpu_compact_records_match_wgsl_offsets_in_actual_million_sample_allocations()
                 definitions(),
                 r#"
 @group(0) @binding(0) var<storage, read> positions: array<CloudPosition>;
-@group(0) @binding(1) var<storage, read> samples: array<CloudSample>;
+@group(0) @binding(1) var<storage, read> attributes: array<u32>;
 @group(0) @binding(2) var<storage, read_write> result: array<u32>;
+@group(0) @binding(3) var<uniform> packing: vec4<u32>;
 @compute @workgroup_size(4)
 fn check(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let row = invocation.x;
     let index = array<u32, 4>(0u, 1u, 65535u, 999999u)[row];
     let p = positions[index];
-    let s = samples[index];
-    let fields = array<u32, 12>(bitcast<u32>(p.xyz.x), bitcast<u32>(p.xyz.y),
-        bitcast<u32>(p.xyz.z), p.source_index, s.rgba, bitcast<u32>(s.value), s.category,
-        bitcast<u32>(s.radius_m), s.flags & (CLOUD_COLOR_VALID | CLOUD_VALUE_VALID | CLOUD_CATEGORY_VALID | CLOUD_RADIUS_VALID), s.acquisition_ns[0], s.acquisition_ns[1], s.palette_indices);
-    for (var field = 0u; field < 12u; field += 1u) { result[row * 12u + field] = fields[field]; }
+    let base = index * packing.x;
+    let colors = packing.x - packing.z;
+    var sample = CloudSample(packing.y, 1u, vec2(0u));
+    if colors > 0u { sample.words.x = attributes[base]; }
+    if colors > 1u { sample.words.y = attributes[base + 1u]; }
+    if packing.w != CLOUD_ALL_VALID { sample.valid = (attributes[packing.w + index / 32u] >> (index % 32u)) & 1u; }
+    var radius = 0u;
+    if packing.z != 0u { radius = attributes[base + colors]; }
+    let fields = array<u32, 8>(bitcast<u32>(p.x), bitcast<u32>(p.y), bitcast<u32>(p.z),
+        sample.kind, sample.valid, sample.words.x, sample.words.y, radius);
+    for (var field = 0u; field < 8u; field += 1u) { result[row * 8u + field] = fields[field]; }
     var age = cloud_source_age_ns(vec2(0xfffffffeu, 0xffffffffu), vec2(0xfffffffcu, 0xffffffffu), array<u32, 2>(row + 1u, 0u));
     if row == 3u { age = cloud_source_age_ns(vec2(2u, 1u), vec2(0xfffffffeu, 0u), array<u32, 2>(3u, 0u)); }
-    result[48u + row] = bitcast<u32>(age);
+    result[32u + row] = bitcast<u32>(age);
 }
 "#
             )
@@ -302,6 +328,10 @@ fn check(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 binding: 2,
                 resource: output.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: uniform.as_entire_binding(),
+            },
         ],
     });
     let mut encoder = device.create_command_encoder(&Default::default());
@@ -326,6 +356,6 @@ fn check(@builtin(global_invocation_id) invocation: vec3<u32>) {
         position.size() + samples.size(),
         output.size(),
         readback.size(),
-        4 * (size_of::<Position>() + size_of::<Sample>())
+        4 * size_of::<Position>() + attributes.bytes().len()
     );
 }

@@ -4,7 +4,8 @@ use super::*;
 fn normal_survey_fits_with_its_real_coarse_index_and_shared_style_bounds() {
     let coarse_points = 19_584;
     let pages = 77;
-    let source_bytes = 5_000_000 * 48 + coarse_points * 48 + pages * 1024;
+    let point_bytes = 16;
+    let source_bytes = 5_000_000 * point_bytes + coarse_points * point_bytes + pages * 1024;
     let reserve = headroom(
         1_000_000,
         [coarse_points].into_iter(),
@@ -14,10 +15,10 @@ fn normal_survey_fits_with_its_real_coarse_index_and_shared_style_bounds() {
         0,
     );
     assert_eq!(reserve, 27_203_328);
-    assert_eq!(source_bytes + reserve, 268_222_208);
+    assert_eq!(source_bytes + reserve, 107_595_520);
     assert!(source_bytes + reserve <= 256 << 20);
     let old_reserve = 8_000_000 + 8 * 1024 * 1024 + 14_720_000 + pages * 16_384;
-    assert!(source_bytes + old_reserve > 256 << 20);
+    assert!(reserve < old_reserve);
 }
 
 #[test]
