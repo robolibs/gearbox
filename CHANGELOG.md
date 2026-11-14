@@ -1,5 +1,803 @@
 # Changelog
 
+## [0.1.0] - 2026-11-14
+
+### <!-- 0 -->⛰️  Features
+
+- Hologram looks for every data kind
+- Raise reference budgets to 4 and 2 GiB
+- Add typed spatial data rendering
+- Log lateral speed per tick
+- Publish lateral speed at the pose
+- Report simulator stall time per run
+- Drive the Frenet follower
+- Drive the velocity-obstacle follower
+- Restart a detached viewer between runs
+- Report slow control-loop passes
+- Sweep dead shm segments with peer sweep
+- Isaac takes controller params from env
+- Bench slip, lab safety and slip tracker
+- Lab logs clearance to nearest obstacle
+- Lab restarts the viewer every 15 runs
+- GEARBOX_DRAW_OPACITY scales all drawings
+- Bench yaw gain, isaac per-tick log
+- Lab saves results after each run
+- Bench jitter metric, clearance trace
+- Ondrive lab, bench, isaac runner
+- Debug draw api, robotics widgets
+- Cylinder hulls build as cylinders
+- Cue the printer's course into the shot
+- Printer builds the wall course by course
+- Rovers on film, rush out to Perseverance
+- Rovers patrol, Perseverance samples
+- Bigger Honda rocket, Perseverance afar
+- Sway robots clear of the camera
+- Printer lays the next course round
+- Tf switches in a camera path
+- Film inside the greenhouses
+- Rocket and printer textures
+- Washers, diggers and printer at work
+- Ariane, honda hopper, marsha printer
+- Bushier peppers, glossier fruit
+- Overlay tf on named machines
+- Tf overlay on named machines, faded
+- Path keys follow a machine link
+- Fade glass only at the lens
+- Camera path and record shutter
+- Fly one smooth path through views
+- Blend frames through a shutter
+- Write the camera path beside video
+- Film the base tour in one take
+- Crane long glides behind the target
+- A filmed tour of the mars base
+- Glide place views with --over
+- Render headless with no display
+- Fit out the crew buildings
+- Pad services, switchyard, keep-out
+- Farm hall, crop table, wall-to-wall benches
+- 40 kWe fission surface power units
+- Seedling carts in the Farm pane
+- Ship hall seedlings by cart
+- Carts of seedlings between rooms
+- Yellow spent fruit vines
+- Mill grain, spoil fresh food
+- Set nursery seedlings out in the runner
+- Farm pane of food, power and rooms
+- Far plant LOD, LED bar lamps
+- Pollinate, transplant, feed crew
+- Grow 21 BVAD crops in ten forms
+- Sample cameras only when subscribed
+- Serve the API between steps
+- Step physics on its own thread
+- One thread per farm robot
+- Substep override and sleep count
+- A script that works the farm
+- Robots that work the mars farm
+- Log bodies and colliders with cost
+- Dust on glazing, robots clean it
+- Fit the yard and weather the base
+- Build the gantry robots from meshes
+- Weather modules and strew rocks
+- Headless mars base module preview
+- Perseverance joins the mars base fleet
+- Articulated, weathered sev rover
+- Mars base from separate modules
+- Crops grow by daylight in glass
+- Widen the home pad to hold a base
+- Tend plants by robot reach
+- Greenhouse rail robot
+- Plant hulls, lamp light and climate sensing
+- Greenhouse tool api and cli
+- Mars greenhouse world with growing crops
+- Look at a place above the ground
+- Greenhouse crop and climate model
+- Prepared pad at home off earth
+- Physical mars sky and weather api
+- World clock and planet calendars
+- Add blender import and export recipes
+- Promote packages to schema v2
+- Add shared robot and control contract
+- Added machine submodule
+- Mars and moon
+- Machine move distance and routes
+- Discs and rollers roll on worked soil
+- Float and five second strokes
+- Glide and hold camera shots
+- Record and overlay requests from the cli
+- Disc harrows work the soil
+- Cone, distance and break joint limits
+- D6 joints, collision flags, inertia axes
+- Motors run on their authored drive
+- Motors move authored joint drives
+- Exact camera views from the cli
+- Authored drives, hitches, friction
+- Shadowless sun for lean sensor views
+- Show fps in the viewport label
+- Hitch variants by reach and top link
+- Drive joints through motor devices
+- Copters, drag and gusting wind
+- Cpu gust sampler for physics
+- Strafe and climb in machine move
+- Copter and drag readings
+- Webots actuator devices
+- Actuator device backend api
+- Actuator commands and readings
+- Webots generic sensor links
+- Filtered backend ray casts
+- Measurement and emit wire types
+- Imu, lidar and bevy camera sensor links
+- Tie follow to the machine's motion
+- Improve physics, visuals, and control options
+- Wire native coupled patch probes
+- Configure final contact sweep budget
+- Export solved velocity boundaries
+- Add native contact-block probes
+- Bind authored tooth profiles
+- Capture active native contact counts
+- Capture native contact subphase ticks
+- Connect tracked rubber viscosity
+- Prepare authored machine visuals
+- Render rigid links from GPU poses
+- Prepare bonded CEOL outer treads
+- Bind authored CEOL wheel contacts
+- Validate bounded CEOL ground contacts
+- Prepare mass-consistent CEOL belts
+- Bind authored CEOL hitch loops to GPU
+- Prepare authored CEOL articulation
+- Resolve authored machine topology
+- Snapshot GPU surfaces per render frame
+- Render GPU-deformed surfaces
+- Pace native FEM GPU islands
+- Drive imported continuous belts
+- Bind pinned Molla track forces
+- The view is a place on the planet
+- The tread comes off the line a wheel drove
+- Tyres drag, behind a flag until molla has it
+- Neutral coasts, reverse is the brake
+- The engine sits behind a backend
+- A body stands in its own site
+- Publish authored field friction
+- Expose solver wrench telemetry
+- Wire molla sleep and wake
+- Preserve pressure in machine saves
+- Add atomic axle pressure controls
+- Deform imported rubber meshes
+- Show tyre pressure in machine sidebar
+- Wire pressure controls and footprints
+- Support authored joint loops
+- Connect articulated tyre forces
+- Enable molla hitch compliance
+- Add molla backend adapter
+- The tyre says what mark it leaves
+- The tyre says what mark it leaves
+- Each cover says what its way wears to
+- A made road is cambered, a track is a trough
+- A berm stands outside each rut
+- A tyre prints its bars into the rut
+- A rut has a channel down one side of it
+- Stones lie where the wheels do not
+- Weeds thicken on a way's verge
+- Two wheels, two lines, not a mirrored pair
+- A way has a damp line along its edge
+- A way is worn its own amount, in stages
+- A way is worn through, not painted on
+- A way carries grit, and nothing stands in it
+- A wheel's scar outlives its flattening
+- Driving bares a meadow, not just bare ground
+- A crossroads is dug out, not only worn
+- A crossroads is worn worse than its roads
+- A way may bend through sixteen points
+- Two ways may cross one field
+- A way sinks the ground it runs over
+- The default scene gets a farm track
+- A road crosses fields, clipped not resampled
+- A way wears a meadow, not just bare ground
+- Wear follows a way, not a field's shape
+- A plant's root sees less sky than its crown
+- A plough turns on the field's own headland
+- A meadow washes into its neighbours too
+- Wheels press a way lower and smoother
+- A way wears down to the stone under it
+- A layout sets how worn each way is
+- A ground washes into what lies across its edge
+- Soft borders let neighbours interleave
+- Driving a way across wears it bare
+- The verge closes in on a worn way
+- A surface wears where the wheels run
+- Soil changes over tens of metres too
+- The stubble carries its own weeds
+- Stones are chipped and slabbed, not all round
+- Dandelion and nettle stand in the meadow
+- Real plants stand where the grass is
+- Crumbs of earth stand in the soil, and it cracks
+- Grass runs uneven inside a clump
+- Clumps lie in runs and ribbons, not discs
+- A tyre presses the stones it rolls over
+- Bare ground runs to grit and stone
+- The soil goes green where its clumps stand
+- Stones come in flint, sandstone and chalk
+- Grit and stones lie thick in bare ground
+- Grass clumps and stones stand in bare ground
+- Stones and tufts stand in the bare ground
+- Bare ground made, not scanned
+- Sand made from noise, no scan
+- A bare soil ground for sand, dirt and plough
+- Three lands by damp, sand needs its own ground
+- Dry country looks dry
+- The land follows the damp of the ground
+- Follow without swinging behind, quieter air
+- More motes, closer in
+- Motes take the colour of their ground
+- A camera lens, and quieter motes
+- Biome layers, blending and drifting motes
+- Machine poses in their own fixed datum
+- Machines re-anchor as they travel
+- Place and report machines by lat/lon/alt
+- WGS84 datums over an ECEF world
+- Wheel tracks survive the ground moving
+- Camera goto a place on the planet
+- Sun and clouds belong to the planet
+- Sites across the planet, view travels
+- Physics regions and site-local poses
+- One land over the planet, per-site frames
+- Big_space planet frame and home site
+- Ground streams around every machine
+- Ground and grass follow the view
+- Clouds from noise over the whole globe
+- Clouds wrap the whole planet
+- Unlimited zoom out to the planet
+- Air thins with camera height
+- Sun disc, cloud shadows, sky light
+- 3 m slabs and tyre tread marks
+- Group tabs into collapsible boxes
+- Remember window size and position
+- Default to mixed grass+wheat layout
+- Tabbed shelf UI, shell bar, shortcuts pane
+- Dock panes in a real Shelf sidebar
+- Merge gearbox-sim and gearbox-cli into one binary
+- Add peer list/sub, inline redraw, colored JSON
+- Drive the selected machine with WASD
+- Publish GNSS lat/lon/alt + heading via concord
+- Publish odom/imu in REP-103 (Gazebo/Isaac) frame
+- Allow relay, and grant a live instance's peers
+- Add top-level subscribe, drop machine/api sub
+- Make --instance optional everywhere it can be
+- Address a machine directly by its own did
+- Add gearbox machine sub for any topic
+- Add tiling wind gust map for vegetation
+- Decode any topic's fields generically
+- Add gearbox machine encoders/imu/turn-radius CLI
+- Publish wheel encoders, turn radius, and IMU topics
+- Improve machine context and attachment UX
+- Ghost of tsushima style grass, stubble
+- Chrome trace profiling build
+- Poly haven clumps as vegetation layers
+- Grass species patches, tilted blades
+- Stubble clover and regrowth patches
+- Wheat stubble default, darker tracks
+- Improve fields, driving and TF rendering
+- Triple the blade density
+- Move and yaw gizmo while paused
+- Torque, power, steer caps, ground grip
+- Suspension role, derived wheelbase
+- Tyres carry machines on contact
+- Trailer stand variant, forced steering
+- Every wheel presses the lawn
+- Variant selections for machine loads
+- Wheel tracks press the lawn
+- GPU-instanced lawn, LOD terrain tiles
+- Procedural meadow with grass blades
+- Machine pane heads the left rail
+- Mirror bus selection, pane tweaks
+- Scripted ui, window capture, pane fixes
+- Re-host the viewer in a mara window
+- Consume usd_bevy physics markers
+- Migrate to bevy_openusd v0.1.0, own rapier adapter
+- Agent tree with follow radio and fly
+- Pause gizmo, gamepad drive, camera follow and fly
+- WASD drive, grouped hitches and PTOs, folded start
+- Machine pane generated from USD controllers
+- TF tree overlay with frame, name, link toggles
+- Tf recording flag and new event kinds
+- Element trees, DDOP, PTO binding, requests
+- Service controllers and slave requests
+- Static attachments, manifests, docs
+- Attach slaves to masters over couplings
+- Stream link poses on machine tf topic
+- Discover and publish machine link trees
+- Add gearbox CLI, sim becomes gearbox-sim
+- Add hunter, husky, tracer geometry
+- Port scripts to the peerbus client
+- Replace zenoh bus with agentio agents
+- Update gearbox ecosystem to version 0.0.6
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Shorten the lookahead to half a body
+- Steer small turns while moving
+- Track the error score through stalls
+- Start machines along the path
+- Model the Kubota from its chassis origin
+- Free glass materials with their machine
+- End loop runs after their laps
+- Score reversing legs past a cusp
+- Brake machines while they settle
+- Report signed forward speed
+- Restart the viewer every 6 runs
+- Drop scene frames while draws back up
+- Drop retired machines' directory records
+- Exit cleanly on ctrl-c, sigterm and stop
+- Judge goal scenarios by the goal, not the line
+- Retry a run on a fresh viewer, never reload
+- Measure hunter footprint from its frames
+- Measure kubota footprint from its frames
+- Reload a machine that fails to appear
+- Brake on stop, abort runs on contact
+- Lab skips the sloped row of areas
+- Lab respawns on bad areas, aborts stuck runs
+- Bench plant steers right when reversing
+- Lab times runs by the sim clock
+- Lab time limit allows soil slip
+- Hunter pose sits ahead of rear axle
+- Kubota body sits ahead of rear axle
+- Lab cycles 48 flat areas
+- Lab label rides on the machine
+- Isaac sphere wheel contacts, quit
+- Steering windup, low-speed steer
+- Keep the printer cue past a timed course
+- Perseverance cores the ground
+- Ease the ground under a sweeping view
+- Cross dome glass square-on
+- Close on the digger, swayed robots
+- A take outlives its script
+- Keep glass see-through on export
+- Film the tour as one camera path
+- Film the arches from above, never inside
+- Clear glass from further off
+- Calmer one-take tour route
+- Calm glides and clear glass near eye
+- Lift MARSHA's floor off its footing
+- Steadier tour shots
+- Hold a shot's bearing, add --compass
+- Follow a held machine on a spring
+- Wait for every frame before closing
+- Step a frame's worth on a hand clock
+- Share host clients among robots
+- No dust on indoor grow materials
+- Replan rounds, rank jobs, restart robots
+- Duller fruit under the grow lamps
+- Size climate kits to their trays
+- Dial the host and machines directly
+- Catch up owed steps when taking the world
+- Pan with sensor cameras in the world
+- Middle drag pans over machine cards
+- Stage uploads outside the bar heap
+- Farm robots' routes and arm moves
+- Settle machines on the floor under them
+- Clamp mesh slabs to the device limit
+- Tell machines of one stage apart
+- Wait 30 s for a busy control plane
+- Per-robot reach, any service spot
+- Report small room leaks
+- Let mould fade once fans run
+- Drop the hulls of plants gone
+- Keep world-anchored machines in place
+- Stop resetting driven light levels
+- Place body-less colliders in site
+- Cluster point and spot lights while any exist
+- Run on the system vulkan driver on nixos
+- Lift a parked stand out of the ground
+- Road edges ignore the stubble rows
+- Worked strip edges stay straight
+- Top link reaches a parked implement
+- Flat ground deep enough to hold
+- Fixed joints keep their frame rotations
+- Tyres take a cylinder's own axle
+- Hold brakes with the servo again
+- Pin complete correction schedule
+- Pin precise contact accumulation
+- Pin coupled scalar constraints
+- Pin contact block subset correction
+- Pin increment and stress correction
+- Use compensated material polish
+- Pin strict material force precision
+- Pin preserved gradient corrections
+- Pin compensated tet gradients
+- Pin stable box contact geometry
+- Pin rotated tet force precision
+- Pin incremental cord extension
+- Stabilize native articulation feedback
+- Reject external articulation joints
+- Pin bounded GPU contact preparation
+- Pin coupled GPU joint stop reactions
+- Report zero force for slack cords
+- Gate initial state and rendered validity
+- Gate native steps on GPU diagnostics
+- The shadow map reaches past the horizon
+- The globe sits under the ground, not over it
+- Grass sows again where the view moved to
+- The map holds the tread the line has let go
+- Tracks overlap instead of cutting each other
+- Only the widest tyre lays the tread
+- A steering box does not snap to lock
+- A removed wheel leaves no registration
+- Preserve readout during machine spawn
+- Pass body kind wake policy
+- Align articulated machines atomically
+- Honor teleport wake flag
+- Honor additional mass wake flag
+- Honor impulse wake flags
+- Forward nonwaking body input flags
+- Honor wake strength in molla
+- Preserve parked molla sleep
+- Hold parked wheel angles
+- Reuse active drive sessions
+- Claim keyboard only on input
+- Match support to rubber radius
+- Restore responsive deformation
+- Identify the active physics window
+- Clarify live tyre pressure status
+- Preserve articulated towing poses
+- Retain unchanged tyre readout
+- A way is worn, not printed by a tyre
+- The backdrop has no edge to cut on
+- A name twice left the meadow no ground
+- A side lays one band, not two fat ones
+- One line a side, so a turn stays steady
+- A tyre's middle void holds the swap
+- A wheel never rubs out another's mark
+- A turning wheel keeps its mark
+- A wheel's mark keeps its own width
+- A tyre prints from a line that holds still
+- Both joint bases drive the same way
+- Bare ground lost to a doubled import
+- A way sinks what the wheels stand on too
+- The mottle stops where the pixel does
+- A field edge frays rather than wanders
+- The ground texture ends on a crooked edge
+- A wheel presses soil, it does not lay stone
+- A boundary road is one road, not two halves
+- Narrow.json shows all three of its ways
+- Ruts wander within their own way
+- A verge stays inside the way it edges
+- A hollow belongs to the way that made it
+- A narrow way wears as one strip, not two
+- A wheel map never outgrows its device
+- A recovery longer than the clock is named
+- A layout names what is wrong with its ways
+- Stubble meets its neighbours from its own side
+- An empty way never leads a pair
+- Like meets like without a seam
+- A field's own way sinks like a road does
+- A test helper follows Bevy's new fetch
+- A profile names its stones, not guesses them
+- One ploughing direction to a field
+- A rut shades deeper, since it cannot cut
+- A verge frays the edge without easing the wear
+- Wind ripples wander, plough furrows do not
+- Thinner blades, half again as many
+- The ground's grass stain stops being emerald
+- A broad leaf is lit by its own face
+- Crumbs are crumbs, and fade without a ring
+- A worked field is picked over, a track is not
+- Sand has grains, not clods
+- A furrow is a turned slice, not a wave
+- The cracks come out and the crumbs thin down
+- Nothing in a clump runs away in height
+- Furrows and ripples stop moiring from the air
+- No hairline cracks, and sand keeps its own stones
+- Stones are lumps, not starfish
+- Soil has a colour once its sheen is gone
+- Clods are cells, and no ridged noise draws whorls
+- The bare ground compiles, and a plough runs straight
+- Fold the land noise so no lattice shows
+- A light's colour carries its lux, use its hue
+- Motes read against the ground, not the sky
+- Motes no brighter than their ground
+- No lens blur, motes take after their cover
+- Hand the ground over without a stall
+- Plan steps after the clock, draw between steps
+- Band-limit clouds, planet-scale systems
+- Clamp slider values to their range
+- Cloud shadow map follows the view
+- Keep planet cap under distant valleys
+- True cloud shadows, follow camera
+- Follow yaw tracks machine heading
+- Pass impure to nix_develop, drop workaround
+- Actually pass nvidia detection to nix eval
+- Detect nvidia via sysfs, no shell/PATH dependency
+- Decide nixVulkan alias before flake evaluation
+- Match nvidia by vendor id and any display class
+- Stop touching BACKEND/RUN_WITH, resolve wl socket live
+- Retry nvidia pci detection before falling back
+- Detect nvidia via pci bus, not driver proc state
+- Stop trusting shared display script, detect nvidia for real
+- Build everything, detect display fresh per run
+- Stop trample stamps aging a clock period early
+- Put IMU yaw rate on Z, not Y
+- Stop accel and turn_radius spiking from noise
+- Drop --machine, subscribe takes the full topic
+- Require subscribe topics to start with /
+- Let machine sub take a full topic path
+- Turn at every corner over 25 degrees
+- Turn lets go before it overshoots
+- Bale tractors at 2 m/s
+- Field speeds, forward turn, no stops
+- Find wheels without the dev shell
+- Bale runs on the sim ground
+- Full translate and rotate gizmo again
+- Drop motion blur, it smeared the camera
+- Traction control, blur rolling wheels
+- Scaled cube colliders, rigid drawbar
+- Tow trailers behind tractors
+- Tracks follow wheel bodies, tyre-wide
+- Gradient noise ends ground checkerboard
+- Drop requests sent before the host started
+- Sync drive switches, widen gamepad input
+- Unload one machine by id
+- Cap PTO torque and rpm, pane shows on/off
+- Read matrix transforms without transposing
+- Inertia guard per axis
+- Filtered pairs, inertia guard, debug logs
+- Pin motor model, hold axle pivots
+- Allow list, no-vsync default, screenshot leaf
+
+### <!-- 2 -->🚜 Refactor
+
+- Remove legacy profile and v2 naming
+- Top link hangs on its rod
+- Drop unread machine attributes
+- Drop the rapier backend
+- One header for the joints, one for the tyres
+- Engine behind PhysicsBackend
+- Daylight drops a map it never read
+- Drop a helper that returned nothing
+- Comments back under the line
+- A headland belongs to a field, not a grid
+- Clumps read the same patches as the grass
+- One copy of what the two shaders must share
+- Bare ground drops its unused soil scans
+- Extract bevy_weather, add haze
+- Extract gearbox-fields crate
+- Fold subscribe into peer sub
+- Finish collapsing ns/namespace into machine_id
+- Collapse namespace and machine_id into one field
+- Remove the raycast vehicle
+- Four panes for a robotics sim
+- Drop DDOP, working parts are links
+
+### <!-- 3 -->📚 Documentation
+
+- Name the api gearbox draw
+- Regenerate the command tree
+- Describe the farm as rebuilt
+- The farm's robots and their carts
+- Keep specs and the grass plan under docs
+- The farm's robots and work plan
+- Mars base, daylight crops and fleet robots
+- Mars greenhouse research report
+- Greenhouse spec, mars time and sky
+- Point planet launches at machines submodule
+- Add robot contract and amend specs
+- Grass performance plan and measurements
+- Machine, controller and tool contracts
+- Molla is the only physics engine
+- Copters, drag and wind
+- Record retained shear results
+- Record paired release results
+- Record quadratic response results
+- Record full-rank loop results
+- Require machine compatibility data
+- What lies on a way, and where
+- Only an authored way has room for a verge
+- A soft track carries the field's own earth
+- Wear says how hard, ways say where
+- The ways section stops contradicting itself
+- A way may run along a boundary
+- A new cover is told what it must read
+- The README learns about ways
+- How a way is worn, and how fields meet
+- Note the nix_develop env gap oslo still has
+- Allowlist item no longer blocked
+- Note replayed bus requests after restart
+- Rewrite wheels plan against bin/gearbox
+- Drop finished plans, keep open work in PLAN_LATER
+- Steered wheel chain, steer link parents wheel
+- Remove the last DDOP wording
+- Plan link trees and attachments
+- Add controller, tools, cli and com plans
+
+### <!-- 4 -->⚡ Performance
+
+- Close machine agents side by side
+- Step the house once a world second
+- Pre-grow trays a sol at a time
+- Find shared-stage poses by prim index
+- Cut per-frame wheel force scans
+- Propagate only dirty low-precision trees
+- Sample links only when subscribed
+- Scan for tyre meshes only on change
+- Remember lookups per stage root
+- Read joint props without copying
+- Skip trace strings and owner clones
+- Format only changed link props
+- Read molla contacts once a step
+- Read ground contacts once a step
+- Read link values by range
+- Publish states beside the physics
+- Memoise visual colours per build
+- Bound cards by machine subtree
+- Budget sensor camera renders
+- Write back only moved bodies
+- Sleep at box2d tolerances
+- Light only what a camera can see
+- Memoise prim and joint lookups
+- Batch collider edits
+- A collider mesh per module part
+- Re-dress plants, keep hulls
+- Hulls only for plants in reach
+- Share one scene, build it off frame
+- Build machine info only when asked
+- Rewrite grass uniforms only on change
+- Gpu-sown blades, grit sieve, early culls
+- Pin parallel coupled patch solver
+- Pin ordered contact projection kernel
+- Pin zero-impulse contact update
+- Use cached GPU tet gradients
+- Pin separated static contact solver
+- Pin specialized track contact solver
+- Use cooperative GPU contact in native
+- Pin fixed-world contact fast path
+- Filter solver stage traces
+- Keep deformation on the GPU
+- One walk of the way answers every question
+- A chunk the road misses pays nothing
+- Drop unused gpu timing readback
+- Planet as a visible cap mesh
+- Shared layer meshes, slot uniforms
+- No light clustering for sunlit views
+- Parse machine stages once, time phases
+
+### <!-- 6 -->🧪 Testing
+
+- Skip packages without a .blend
+- Bound slow-frame ticks by real time
+- Check the blender add-on with gearbox
+- Retry Kit once when it fails to start
+- Add robot contract conformance harness
+- Kubota fixture counts the new hitch
+- Lift the hitch controller's link
+- Tractors lift a mounted harrow
+- A parked trailer with devices stays put
+- Report blockwise Newton convergence
+- Report native Newton iteration history
+- Probe native CEOL global Newton
+- Allow explicit coupling budgets
+- Extend powered engagement probes
+- Probe powered coupled transients
+- Export authored scalar bounds
+- Validate current CEOL geometry
+- Cover revised CEOL track topology
+- Compare equal-horizon timesteps
+- Exercise coupled final polish
+- Capture final contact rejection
+- Exercise guarded material polish
+- Export inertia and servo references
+- Capture longer track transient
+- Cover authored track friction
+- Capture native contact solve inputs
+- Capture consecutive cord steps
+- Add contact-budget refinement probe
+- Probe shorter contact continuation
+- Capture GPU phase timeline
+- Probe edge-first native forces
+- Capture native force components
+- Measure retained material refinement
+- Capture native material force residual
+- Probe native coupled material step
+- Extend native timestep refinement
+- Capture rejected track states
+- Verify authored GPU servo stability
+- Measure passive load equilibrium
+- Capture passive startup trajectory
+- Trace loaded CEOL torque transfer
+- Trace stalled contact preparation
+- Report full track submission progress
+- Isolate joint stop momentum loss
+- Retain toothless sprocket supports
+- Trace airborne momentum stages
+- Cover strict float parsing
+- Report installed cord tension
+- Capture CEOL retention geometry
+- Locate CEOL retention deviations
+- Gate causal CEOL ground propulsion
+- Verify frictionless CEOL tooth drive
+- Wait for render pipeline readiness
+- The merged contract for terrain and tracks
+- Cover imported payload footprint
+- Verify load-driven rubber shape
+- Cover imported topology edits
+- Verify independent Oxbo pressures
+- Trace terrain collision stages
+- Trace Molla on full meadow
+- Cover Oxbo teleport stability
+- Benchmark full meadow terrain
+- Trace active tractor fleets
+- Benchmark mixed tractor fleets
+- Compare parked backend timings
+- Compare paired backend timings
+- Trace trailer support stability
+- Report trailer stop reaction state
+- Reproduce parked trailer tipping
+- Verify Kubota turns and tracks
+- Exercise all Kubota controllers
+- Expose slope parking creep
+- Benchmark imported Kubota
+- Catch a cover rule imported twice
+- The shared cover rules cannot be copied
+- Which line wears a field is pinned
+- A third way is sunk but not worn
+- The seam between like and like is pinned
+- The oxbo pose test reads today's API
+- A lane to drive along and wear bare
+- A lane between two different fields
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Bring typed drawing to bevy 0.20.1
+- Only machines have a .blend
+- Wheels exported in UsdPhysics only
+- Perseverance source with arm filters
+- Rebuild the mars base assets
+- Rebuild the mars base assets
+- Take mara 7ddc9af for frame pacing
+- Move the control scripts into scripts
+- Drop the C and Python bindings
+- Drop mars research notes
+- Rebuild the mars base assets
+- Rebuild the mars base assets
+- Bump to pdf removal
+- Bump blender add-on
+- Retain retired experiment history
+- Preserve local test configuration
+- Snapshot the uncommitted worktree
+- Merge develop into main
+- Checkpoint current controls
+- Isolate release viewer traces
+- Two deprecated calls take their new names
+- Drop dependency on shared robolibs display script
+- Log lspci probe results during nvidia detection
+- Gitignore the local sensors planning note
+- Migrate to oslo config, clean up layout
+- Update flake, gitignore and uv lock
+
+### <!-- 9 -->◀️ Revert
+
+- The nearest line keeps the chevron's phase
+- One line a side broke the straight
+- No tyre tread until it is relief, not colour
+
+### Build
+
+- Take peerbus and bevy_openusd from git
+- Move machines into assets
+- Take molla from a vendor submodule
+- Take molla from the sibling checkout
+- Bump molla to 732195f
+- Pin molla with the revolute angle fix
+- Pin mara to 5d50aeb
+- Pin molla to da495a0
+- Pin molla to 8ec96e8
+- Pin molla to 726f292
+- Pin GPU motor force caps
+- Enable GPU FEM solver dependency
+- One build, and it is the one that runs
+- Include molla vehicle dependency
+
+### Debug
+
+- Trace shell execution during gpu detection
+
 ## [0.0.6] - 2026-07-05
 
 ### <!-- 7 -->⚙️ Miscellaneous Tasks

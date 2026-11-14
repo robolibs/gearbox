@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_biomes"
-version = "0.0.6"
+version = "0.1.0"
 dependencies = [
  "bevy",
 ]
@@ -1850,7 +1850,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_weather"
-version = "0.0.6"
+version = "0.1.0"
 dependencies = [
  "bevy",
  "half",
@@ -3893,7 +3893,7 @@ dependencies = [
 
 [[package]]
 name = "gearbox-api"
-version = "0.0.6"
+version = "0.1.0"
 dependencies = [
  "agentio",
  "bevy",
@@ -3911,7 +3911,7 @@ dependencies = [
 
 [[package]]
 name = "gearbox-cli"
-version = "0.0.6"
+version = "0.1.0"
 dependencies = [
  "agentio",
  "clap",
@@ -3927,11 +3927,11 @@ dependencies = [
 
 [[package]]
 name = "gearbox-controls"
-version = "0.0.6"
+version = "0.1.0"
 
 [[package]]
 name = "gearbox-fields"
-version = "0.0.6"
+version = "0.1.0"
 dependencies = [
  "bevy",
  "bytemuck",
@@ -3942,7 +3942,7 @@ dependencies = [
 
 [[package]]
 name = "gearbox-globe"
-version = "0.0.6"
+version = "0.1.0"
 dependencies = [
  "bevy",
  "concord",
@@ -3950,11 +3950,11 @@ dependencies = [
 
 [[package]]
 name = "gearbox-greenhouse"
-version = "0.0.6"
+version = "0.1.0"
 
 [[package]]
 name = "gearbox-planet"
-version = "0.0.6"
+version = "0.1.0"
 dependencies = [
  "bevy",
  "big_space",
@@ -3966,7 +3966,7 @@ dependencies = [
 
 [[package]]
 name = "gearbox-sim"
-version = "0.0.6"
+version = "0.1.0"
 dependencies = [
  "agentio",
  "anyhow",
