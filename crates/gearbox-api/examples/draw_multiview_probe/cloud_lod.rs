@@ -313,7 +313,7 @@ pub(super) fn run(
                         .as_array()
                         .unwrap()
                         .iter()
-                        .any(|cut| number(cut, "budget_limited_branches") > 0)
+                        .any(|cut| number(cut, "budget_limited_pages") > 0)
                 }),
                 "5M-source scene did not exercise the point cap",
             )?;

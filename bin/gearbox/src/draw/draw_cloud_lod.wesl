@@ -1,10 +1,13 @@
 // Level of detail for compact clouds, chosen on the GPU per view and frame.
 // measure: each visible hierarchy node adds the points it would draw, for every error
 //   threshold, to a histogram over thresholds;
-// choose: the finest threshold no coarser than the view's error that fits its point budget;
+// choose: the finest threshold no coarser than the view's error that fits its point budget,
+//   keeping last frame's when only one bin finer would fit;
 // emit: per page, the refinement-order range each node draws at that threshold, as a table
-//   the vertex stage searches, and the page's indirect draw;
+//   the vertex stage searches, the page's indirect draw, and each node's refinement state;
 // accept: counts the listed points the clip volume keeps.
+// A level a node refined past last frame stays refined until its error falls below KEEP of
+// the threshold.
 import gearbox::draw::draw_cloud_types::{CloudPosition, CloudPageUniform, cloud_clip_accept};
 
 struct TreeNode {
@@ -50,6 +53,10 @@ const NO_PARENT: u32 = 0xffffffffu;
 const HUGE: f32 = 3.0e38;
 const NODES: u32 = 512u;
 const WORKGROUP: u32 = 256u;
+const KEEP: f32 = 0.85;
+// Bits of a node's state: the level it drew last frame, 1 for an internal node refined past.
+const STATE_BITS: u32 = 4u;
+const STATE_WORDS: u32 = 64u;
 
 @group(0) @binding(0) var<uniform> view: LodView;
 @group(0) @binding(1) var<storage, read_write> bins: Bins;
@@ -61,6 +68,8 @@ const WORKGROUP: u32 = 256u;
 @group(2) @binding(1) var<storage, read_write> table: array<vec2<u32>, 512>;
 // The accept dispatch's indirect arguments; only `emit` binds them.
 @group(2) @binding(2) var<storage, read_write> dispatch: vec4<u32>;
+// Each node's state from the previous frame, STATE_BITS per node.
+@group(2) @binding(3) var<storage, read_write> states: array<u32, 64>;
 
 struct Measure {
     visible: bool,
@@ -149,33 +158,53 @@ fn deposit(points: u32, low: u32, high: u32) {
     if high <= BINS { atomicAdd(&bins.diff[high], -i32(points)); }
 }
 
-fn parent_error(node: TreeNode) -> f32 {
-    if node.parent == NO_PARENT { return HUGE; }
-    return measure(tree[node.parent]).error;
+fn state_of(index: u32) -> u32 {
+    return (states[index / 8u] >> ((index % 8u) * STATE_BITS)) & 15u;
 }
 
-// The points `node` draws at threshold bin `chosen`, or adds its whole ladder to the
-// histogram when `chosen` is UNBOUNDED + 1.
-fn ladder(node: TreeNode, chosen: u32) -> u32 {
+// `error` as the threshold that ends refinement past `level`, widened by KEEP for a level
+// the node refined past last frame.
+fn kept(error: f32, state: u32, level: u32) -> f32 {
+    if state > level { return min(error / KEEP, HUGE); }
+    return error;
+}
+
+// The lowest threshold at which an ancestor of `node` draws in its place.
+fn ancestor_bound(node: TreeNode) -> f32 {
+    var bound = HUGE;
+    var at = node.parent;
+    for (var depth = 0u; at != NO_PARENT && depth < NODES; depth += 1u) {
+        bound = min(bound, kept(measure(tree[at]).error, state_of(at), 0u));
+        at = tree[at].parent;
+    }
+    return bound;
+}
+
+// The points node `index` draws at threshold bin `chosen` and its state there, or adds its
+// whole ladder to the histogram when `chosen` is UNBOUNDED + 1.
+fn ladder(index: u32, chosen: u32) -> vec2<u32> {
+    let node = tree[index];
     let m = measure(node);
-    if !m.visible { return 0u; }
-    var high = bin_of(parent_error(node));
+    if !m.visible { return vec2(0u); }
+    let state = state_of(index);
+    var high = bin_of(ancestor_bound(node));
     let accumulate = chosen > UNBOUNDED;
     if node.leaf == 0u {
-        let low = bin_of(m.error);
-        if accumulate { deposit(1u, low, high); return 0u; }
-        return select(0u, 1u, low <= chosen && chosen < high);
+        let low = bin_of(kept(m.error, state, 0u));
+        if accumulate { deposit(1u, low, high); return vec2(0u); }
+        let reached = chosen < high;
+        return vec2(select(0u, 1u, reached && low <= chosen), select(0u, 1u, reached && chosen < low));
     }
     var error = m.error;
     var points = 1u;
     for (var level = 0u; level <= 8u; level += 1u) {
         let full = points >= node.count;
-        var low = bin_of(error);
+        var low = bin_of(kept(error, state, level));
         if full { low = 0u; }
         if accumulate {
             deposit(min(points, node.count), low, high);
         } else if low <= chosen && chosen < high {
-            return min(points, node.count);
+            return vec2(min(points, node.count), level);
         }
         if full { break; }
         high = min(high, low);
@@ -183,37 +212,55 @@ fn ladder(node: TreeNode, chosen: u32) -> u32 {
         let spacing = level_error(node, min(level + 1u, 7u)) + 2.0 * page.lod.z;
         error = min(error, select(m.slope * spacing, HUGE, m.slope >= HUGE));
     }
-    return 0u;
+    return vec2(0u);
 }
 
 @compute @workgroup_size(256)
 fn measure_nodes(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= page.tree.x { return; }
-    ladder(tree[id.x], UNBOUNDED + 1u);
+    ladder(id.x, UNBOUNDED + 1u);
 }
 
 @compute @workgroup_size(1)
 fn choose() {
     let finest = bin_of(view.error_px);
+    let previous = bins.chosen;
     var points = 0;
-    bins.chosen = BINS;
+    var chosen = BINS;
+    var chosen_points = 0;
+    var previous_fits = false;
+    var previous_points = 0;
     for (var bin = 0u; bin <= BINS; bin += 1u) {
         points += atomicLoad(&bins.diff[bin]);
-        if bin >= finest && points <= i32(view.budget) {
-            bins.chosen = bin;
-            break;
+        let fits = bin >= finest && points <= i32(view.budget);
+        if fits && chosen == BINS && bin < BINS {
+            chosen = bin;
+            chosen_points = points;
+        }
+        if bin == previous {
+            previous_fits = fits;
+            previous_points = points;
         }
     }
-    bins.points = points;
+    if chosen == BINS { chosen_points = points; }
+    // Last frame's threshold holds while it fits and only one bin finer would.
+    if previous_fits && chosen + 1u == previous {
+        chosen = previous;
+        chosen_points = previous_points;
+    }
+    bins.chosen = chosen;
+    bins.points = chosen_points;
 }
 
 var<workgroup> sums: array<u32, 256>;
 var<workgroup> represented: atomic<u32>;
+var<workgroup> next: array<atomic<u32>, 64>;
 
 @compute @workgroup_size(256)
 fn emit(@builtin(local_invocation_index) lane: u32) {
     let nodes = min(page.tree.x, NODES);
     if lane == 0u { atomicStore(&represented, 0u); }
+    if lane < STATE_WORDS { atomicStore(&next[lane], 0u); }
     workgroupBarrier();
     var counts = vec2(0u);
     var starts = vec2(0u);
@@ -221,9 +268,11 @@ fn emit(@builtin(local_invocation_index) lane: u32) {
         let index = lane * 2u + pair;
         if index < nodes {
             let node = tree[index];
-            counts[pair] = ladder(node, bins.chosen);
+            let drawn = ladder(index, bins.chosen);
+            counts[pair] = drawn.x;
             starts[pair] = select(node.first, node.start, node.leaf == 0u);
-            if counts[pair] > 0u { atomicAdd(&represented, node.count); }
+            if drawn.x > 0u { atomicAdd(&represented, node.count); }
+            atomicOr(&next[index / 8u], drawn.y << ((index % 8u) * STATE_BITS));
         }
     }
     sums[lane] = counts.x + counts.y;
@@ -234,6 +283,8 @@ fn emit(@builtin(local_invocation_index) lane: u32) {
         sums[lane] += other;
         workgroupBarrier();
     }
+    storageBarrier();
+    if lane < STATE_WORDS { states[lane] = atomicLoad(&next[lane]); }
     let before = sums[lane] - counts.x - counts.y;
     if lane * 2u < nodes { table[lane * 2u] = vec2(before, starts.x); }
     if lane * 2u + 1u < nodes { table[lane * 2u + 1u] = vec2(before + counts.x, starts.y); }

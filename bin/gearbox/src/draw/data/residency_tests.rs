@@ -7,7 +7,7 @@ fn normal_survey_fits_with_its_lod_tree_order_and_shared_style_bounds() {
     // Position, colour word and refinement order per point; a tree and placement per page.
     let source_bytes = 5_000_000 * 20 + coarse_points * 16 + pages * (511 * 80 + 1024);
     let reserve = headroom(1, pages as usize, 1, 4 << 20, 14_720_000, 0);
-    assert_eq!(reserve, 128 * (256 + 4096) + 4096 + 16_384 + 2 * (4 << 20) + 14_720_000);
+    assert_eq!(reserve, 2 * 736 + (128 + 64) * (7 * 256 + 2 * 4096) + 16_384 + 2 * (4 << 20) + 14_720_000);
     assert!(source_bytes + reserve <= 256 << 20);
 }
 
@@ -15,7 +15,7 @@ fn normal_survey_fits_with_its_lod_tree_order_and_shared_style_bounds() {
 fn lod_headroom_holds_a_slot_per_visible_page_per_view_and_external_reservations() {
     assert_eq!(
         headroom(2, 3, 2, 1024, 300, 400),
-        2 * (4 * (256 + 4096) + 4096) + 2 * 16_384 + 2048 + 700
+        2 * (2 * 736 + (4 + 2) * (7 * 256 + 2 * 4096)) + 2 * 16_384 + 2048 + 700
     );
     assert_eq!(headroom(0, 0, 0, 1024, 300, 400), 2748);
     assert_eq!(headroom(usize::MAX, usize::MAX >> 1, usize::MAX, u64::MAX, 1, 1), u64::MAX);

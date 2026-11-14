@@ -4,8 +4,9 @@
 //!
 //! A click queues a [`Pick`]; `PostUpdate` adds the occluder depth while the physics
 //! world is home; the render world resolves it after the frame's selection and
-//! returns a [`Found`]. A pick whose camera moved before its frame was drawn is
-//! answered stale rather than resolved against a view the user never saw.
+//! returns a [`Found`] once the points its LOD pass listed are read back. A pick whose
+//! camera moved before its frame was drawn is answered stale rather than resolved
+//! against a view the user never saw.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -31,6 +32,8 @@ pub(crate) const MAX_PICKS: usize = 2;
 /// Camera motion between the click and the drawn frame that makes a pick stale.
 const STILL_M: f32 = 1e-3;
 const STILL_RAD: f32 = 1e-4;
+/// Frames a pick waits for its view's drawn points to be read back.
+const TABLE_FRAMES: u32 = 120;
 /// Farthest occluder searched along the ray, in metres.
 const OCCLUDER_RANGE_M: f32 = 4000.0;
 
@@ -513,19 +516,32 @@ fn resolve(
     views: Query<&ExtractedView>,
     nodes: Query<&super::runtime::Node>,
     octrees: Query<&super::octree::Node>,
+    mut waiting: Local<std::collections::HashMap<u64, (Option<u64>, u32)>>,
 ) {
     let ready: Vec<Pick> = picks.lock().ready.drain(..).collect();
+    let mut later = Vec::new();
     for pick in ready {
         let started = std::time::Instant::now();
-        let found = views
-            .iter()
-            .find(|view| view.retained_view_entity.main_entity.id() == pick.camera)
-            .map_or(Found::Stale("the view was not drawn"), |view| {
-                if moved(&view.world_from_view, &pick.eye) {
-                    return Found::Stale("the camera moved before the frame was drawn");
+        let found = match views.iter().find(|view| view.retained_view_entity.main_entity.id() == pick.camera) {
+            None => Found::Stale("the view was not drawn"),
+            Some(view) if moved(&view.world_from_view, &pick.eye) => {
+                Found::Stale("the camera moved before the frame was drawn")
+            }
+            Some(view) => {
+                // Full pages resolve against the points their LOD pass listed, read back first.
+                let (asked, frames) = waiting.entry(pick.id).or_default();
+                match selections.pick_tables(view.retained_view_entity, asked) {
+                    Some(tables) => nearest(&pick, view, &selections, tables.as_deref(), &nodes, &octrees),
+                    None if *frames < TABLE_FRAMES => {
+                        *frames += 1;
+                        later.push(pick);
+                        continue;
+                    }
+                    None => Found::Stale("the drawn points were not read back"),
                 }
-                nearest(&pick, view, &selections, &nodes, &octrees)
-            });
+            }
+        };
+        waiting.remove(&pick.id);
         let (eye, direction) = (pick.eye.translation(), pick.direction());
         info!(
             "data pick {} at ndc {:?} in {:.2} ms: eye {eye:?} looking {direction:?}, occluder {}: {found:?}",
@@ -536,12 +552,18 @@ fn resolve(
         );
         picks.lock().found.push_back((pick.id, found));
     }
+    let mut exchange = picks.lock();
+    for pick in later.into_iter().rev() {
+        exchange.ready.push_front(pick);
+    }
+    waiting.retain(|id, _| exchange.ready.iter().any(|pick| pick.id == *id));
 }
 
 fn nearest(
     pick: &Pick,
     view: &ExtractedView,
     selections: &Views,
+    tables: Option<&super::render::gpu::Tables>,
     nodes: &Query<&super::runtime::Node>,
     octrees: &Query<&super::octree::Node>,
 ) -> Found {
@@ -576,7 +598,17 @@ fn nearest(
             continue;
         }
         let mut closest: Option<(f32, u32, Vec3)> = None;
-        for record in drawn.range.clone() {
+        let records: Box<dyn Iterator<Item = u32>> = match drawn.tier {
+            Tier::Coarse => Box::new(drawn.range.clone()),
+            Tier::Full => {
+                let order = &geometry.hierarchy.refinement.order.values;
+                match tables.and_then(|tables| tables.ordinals(drawn.entity, order)) {
+                    Some(listed) => Box::new(listed),
+                    None => continue,
+                }
+            }
+        };
+        for record in records {
             let record = record as usize;
             let (ordinal, xyz, attributes) = match drawn.tier {
                 Tier::Full => (

@@ -191,9 +191,27 @@ struct Entry {
 pub(super) struct LodReadback {
     pub view: RetainedViewEntity,
     pub buffer: super::render::OwnedBuffer,
+    /// The page the pass ran in each slot.
+    pub pages: Vec<(Entity, u32)>,
     pub pool: Arc<Mutex<Vec<super::render::OwnedBuffer>>>,
-    /// The view's heads as last read back, per slot.
-    pub last: Arc<Mutex<Vec<super::render::gpu::HeadCounts>>>,
+    /// The view's pages and heads as last read back.
+    pub last: Arc<Mutex<super::render::gpu::Listed>>,
+    /// The view's node tables, copied when a pick waits on them.
+    pub tables: Option<super::render::gpu::TablesCopy>,
+}
+
+impl LodReadback {
+    /// Returns its buffers to their pools.
+    fn release(self) {
+        self.pool.lock().unwrap().push(self.buffer);
+        if let Some(tables) = self.tables {
+            *tables.pool.lock().unwrap() = Some(tables.buffer);
+        }
+    }
+
+    fn buffers(&self) -> impl Iterator<Item = &super::render::OwnedBuffer> {
+        std::iter::once(&self.buffer).chain(self.tables.as_ref().map(|tables| &tables.buffer))
+    }
 }
 
 struct PageMark {
@@ -353,20 +371,26 @@ impl Frame {
     /// Returns the frame's readback buffers to their pools unread.
     fn release_readbacks(&self) {
         for readback in self.readbacks.lock().unwrap().drain(..) {
-            readback.pool.lock().unwrap().push(readback.buffer);
+            readback.release();
         }
     }
 
-    /// Maps every view's copied LOD heads, adds each entry's selected slots, then runs `done`.
+    /// Whether a view copied its node tables for a pick this frame.
+    fn copies_tables(&self) -> bool {
+        self.readbacks.lock().unwrap().iter().any(|readback| readback.tables.is_some())
+    }
+
+    /// Maps every view's copied LOD heads and node tables, adds each entry's selected slots,
+    /// keeps the tables for picks, then runs `done`.
     fn resolve(self: Arc<Self>, done: impl FnOnce(&Frame) + Send + 'static) {
         let readbacks = std::mem::take(&mut *self.readbacks.lock().unwrap());
         if readbacks.is_empty() {
             done(&self);
             return;
         }
-        let buffers: Vec<_> = readbacks.iter().map(|readback| readback.buffer.buffer.clone()).collect();
-        let mapped = Arc::new(Mutex::new(vec![false; readbacks.len()]));
-        let remaining = Arc::new(AtomicUsize::new(readbacks.len()));
+        let buffers: Vec<_> = readbacks.iter().flat_map(LodReadback::buffers).map(|owned| owned.buffer.clone()).collect();
+        let mapped = Arc::new(Mutex::new(vec![false; buffers.len()]));
+        let remaining = Arc::new(AtomicUsize::new(buffers.len()));
         let finish = Arc::new(Mutex::new(Some((readbacks, done))));
         for (index, buffer) in buffers.into_iter().enumerate() {
             let (frame, mapped, remaining, finish) =
@@ -378,30 +402,53 @@ impl Frame {
                 }
                 let Some((readbacks, done)) = finish.lock().unwrap().take() else { return };
                 let mapped = mapped.lock().unwrap();
-                for (readback, ok) in readbacks.into_iter().zip(mapped.iter()) {
-                    if *ok {
-                        frame.apply(&readback);
-                        readback.buffer.buffer.unmap();
+                let mut next = 0;
+                for readback in readbacks {
+                    let heads = mapped[next];
+                    let tables = readback.tables.is_some() && mapped[next + 1];
+                    next += 1 + usize::from(readback.tables.is_some());
+                    if heads {
+                        frame.apply(&readback, tables);
                     }
-                    readback.pool.lock().unwrap().push(readback.buffer);
+                    for (buffer, ok) in readback.buffers().zip([heads, tables]) {
+                        if ok {
+                            buffer.buffer.unmap();
+                        }
+                    }
+                    readback.release();
                 }
                 done(&frame);
             });
         }
     }
 
-    fn apply(&self, readback: &LodReadback) {
-        use super::render::gpu::{HEAD_STRIDE, HeadCounts};
+    /// Stores the view's read-back heads and, when `tables` mapped, its node tables, then adds
+    /// each entry's accepted points.
+    fn apply(&self, readback: &LodReadback, tables: bool) {
+        use super::render::gpu::{HEAD_STRIDE, HeadCounts, Listed, Tables};
         let Some(view) = self.views.iter().position(|mark| mark.view.retained == readback.view) else {
             return;
         };
         let Ok(range) = readback.buffer.buffer.slice(..).get_mapped_range() else {
             return;
         };
-        *readback.last.lock().unwrap() = range
-            .chunks_exact(HEAD_STRIDE as usize)
-            .map(|head| bytemuck::pod_read_unaligned::<HeadCounts>(&head[..size_of::<HeadCounts>()]))
-            .collect();
+        let listed = Listed {
+            pages: readback.pages.clone(),
+            heads: range
+                .chunks_exact(HEAD_STRIDE as usize)
+                .map(|head| bytemuck::pod_read_unaligned::<HeadCounts>(&head[..size_of::<HeadCounts>()]))
+                .collect(),
+        };
+        if let Some(copy) = readback.tables.as_ref().filter(|_| tables)
+            && let Ok(entries) = copy.buffer.buffer.slice(..).get_mapped_range()
+        {
+            *copy.last.lock().unwrap() = Some(Arc::new(Tables {
+                serial: copy.serial,
+                listed: listed.clone(),
+                entries: bytemuck::pod_collect_to_vec(&entries),
+            }));
+        }
+        *readback.last.lock().unwrap() = listed;
         for entry in self.entries.iter().filter(|entry| entry.view == view && !entry.slots.is_empty()) {
             let accepted: u64 = entry
                 .slots
@@ -463,7 +510,7 @@ impl Receipts {
     pub(super) fn lod_readback(&self, readback: LodReadback) {
         match &self.current {
             Some(frame) => frame.readbacks.lock().unwrap().push(readback),
-            None => readback.pool.lock().unwrap().push(readback.buffer),
+            None => readback.release(),
         }
     }
 
@@ -877,7 +924,7 @@ fn submit(mut receipts: ResMut<Receipts>, shared: Option<Res<Shared>>, queue: Re
         frame.release_readbacks();
         return;
     };
-    if !frame.completes() && !frame.awaits_lod() {
+    if !frame.completes() && !frame.awaits_lod() && !frame.copies_tables() {
         frame.release_readbacks();
         return;
     }

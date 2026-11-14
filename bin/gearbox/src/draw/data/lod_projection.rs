@@ -9,7 +9,6 @@ pub(in crate::draw::data) struct View {
     pub clip_from_world: DMat4,
     pub viewport: [u32; 2],
     pub error_px: f64,
-    pub hysteresis: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

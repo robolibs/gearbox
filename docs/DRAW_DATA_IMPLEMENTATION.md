@@ -46,6 +46,22 @@ CPU `lod::select` cut, its pending jobs, index buffers and tests are removed. Th
 checks that cuts have no holes or overlaps, stay within the budget, draw full detail when it
 fits, and cull pages out of view.
 
+Popping: each slot keeps four bits of state per node (the level it drew), and a node bounds
+its threshold by every ancestor's, so the cut stays whole from any state. A refined level
+holds until its error drops below 85% of the threshold, and a view's threshold holds while
+only one bin finer fits. Slots stay with their page across page sets and are cleared when
+handed to another. A page set keeps the LOD buffers it was bound to, so growing them for a
+larger pending set never blanks the active one; the reserve covers both. Probe reports count
+what the last read-back pass listed (`budget_limited_pages`, `max_error_px` from its chosen
+bin), not the CPU cut's branch counters.
+
+Picking: a pick on a view with full pages sets a flag the next LOD pass answers by copying
+its node tables beside the heads readback (one mappable table copy per view). The pick waits
+up to 120 frames for a copy made after it asked, then walks each listed node's
+refinement-order range. Residency's coarse stage holds the full tier with the probe's
+`hold_full` control so the coarse cut is captured deterministically; with 12-byte records a
+bank streams in faster than the probe polls.
+
 ## Compact point records — 2026-11-14
 
 Cloud points drop from 48 to 12 bytes of position plus the attribute words their color

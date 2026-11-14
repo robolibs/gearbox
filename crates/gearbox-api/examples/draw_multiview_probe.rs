@@ -75,6 +75,8 @@ struct Control {
     cpu_headroom: Option<u64>,
     secondary_size: Option<[u32; 2]>,
     secondary_east_m: Option<f32>,
+    /// Views draw every page from its coarse tier while set.
+    hold_full: bool,
 }
 impl Control {
     fn read(&self) -> Result<Report> {
@@ -101,7 +103,7 @@ impl Control {
     fn set(&mut self, action: &str, active: bool, maximum: u64) -> Result<Report> {
         self.sequence += 1;
         let bytes = serde_json::to_vec(
-            &serde_json::json!({"sequence":self.sequence,"action":action,"active":active,"max_generation":maximum,"gpu_headroom":self.gpu_headroom,"cpu_headroom":self.cpu_headroom,"secondary_size":self.secondary_size,"secondary_east_m":self.secondary_east_m}),
+            &serde_json::json!({"sequence":self.sequence,"action":action,"active":active,"max_generation":maximum,"gpu_headroom":self.gpu_headroom,"cpu_headroom":self.cpu_headroom,"secondary_size":self.secondary_size,"secondary_east_m":self.secondary_east_m,"hold_full":self.hold_full}),
         )?;
         std::fs::write(self.root.join("control.tmp"), bytes)?;
         std::fs::rename(
@@ -583,6 +585,7 @@ fn main() -> Result<()> {
         cpu_headroom: None,
         secondary_size: None,
         secondary_east_m: None,
+        hold_full: false,
     };
     let result = if std::env::args().nth(3).as_deref() == Some("auxiliary") {
         auxiliary::run(&mut control, &mut data, &mut writer)

@@ -60,6 +60,8 @@ struct Control {
     #[serde(default)]
     pause_receipts: bool,
     #[serde(default)]
+    hold_full: bool,
+    #[serde(default)]
     secondary_size: Option<[u32; 2]>,
     #[serde(default)]
     secondary_east_m: Option<f32>,
@@ -103,8 +105,8 @@ pub(super) struct LodReport {
     pub represented: u64,
     pub selected: u64,
     pub culled: u64,
-    pub pending_branches: u64,
-    pub budget_limited_branches: u64,
+    /// Full pages whose LOD threshold the point budget raised above the view's error.
+    pub budget_limited_pages: u64,
     pub max_error_px: Option<f64>,
     pub pages: u64,
     pub preparing: bool,
@@ -198,6 +200,7 @@ fn allocation_snapshots_preserve_per_kind_upload_totals() {
     let probe = Probe {
         cpu: Default::default(),
         pause_receipts: AtomicBool::new(false),
+        hold_full: AtomicBool::new(false),
         secondary: AtomicU64::new(u64::MAX),
         max_generation: AtomicU64::new(0),
         delayed: AtomicU64::new(0),
@@ -226,6 +229,7 @@ pub(super) struct Allocations {
     pub page_loads: u64,
     pub evicted_pages: u64,
     pub indices: u64,
+    pub lod_views: u64,
     pub selected_points: u64,
     pub positions: u64,
     pub attributes: u64,
@@ -254,6 +258,7 @@ fn legacy_snapshots_keep_distinct_upload_totals_and_frame_progress() {
     let probe = Probe {
         cpu: Default::default(),
         pause_receipts: AtomicBool::new(false),
+        hold_full: AtomicBool::new(false),
         secondary: AtomicU64::new(u64::MAX),
         max_generation: AtomicU64::new(0),
         delayed: AtomicU64::new(0),
@@ -300,6 +305,8 @@ fn legacy_snapshots_keep_distinct_upload_totals_and_frame_progress() {
 pub(super) struct Probe {
     pub cpu: cpu::Pressure,
     pause_receipts: AtomicBool,
+    /// Views draw every page from its coarse tier while set.
+    hold_full: AtomicBool,
     secondary: AtomicU64,
     max_generation: AtomicU64,
     delayed: AtomicU64,
@@ -394,6 +401,7 @@ impl Probe {
         Self {
             cpu: Default::default(),
             pause_receipts: AtomicBool::new(false),
+            hold_full: AtomicBool::new(false),
             secondary: AtomicU64::new(u64::MAX),
             max_generation: AtomicU64::new(0),
             delayed: AtomicU64::new(0),
@@ -412,6 +420,10 @@ impl Probe {
 
     pub fn receipts_paused(&self) -> bool {
         self.pause_receipts.load(Ordering::Acquire)
+    }
+
+    pub fn holds_full(&self) -> bool {
+        self.hold_full.load(Ordering::Acquire)
     }
 
     pub fn receipts(&self, value: ReceiptReport) {
@@ -563,6 +575,7 @@ pub(super) fn install(app: &mut App) {
     app.insert_resource(ProbeState(Arc::new(Probe {
         cpu: Default::default(),
         pause_receipts: AtomicBool::new(false),
+        hold_full: AtomicBool::new(false),
         secondary: AtomicU64::new(u64::MAX),
         max_generation: AtomicU64::new(0),
         delayed: AtomicU64::new(0),
@@ -580,6 +593,7 @@ pub(super) fn install(app: &mut App) {
             gpu_headroom: None,
             cpu_headroom: None,
             pause_receipts: false,
+            hold_full: false,
             secondary_size: None,
             secondary_east_m: None,
         },
@@ -641,6 +655,7 @@ pub(super) fn drive(
     }) {
         probe.0.cpu.configure(control.cpu_headroom);
         probe.0.configure_receipts(control.pause_receipts);
+        probe.0.hold_full.store(control.hold_full, Ordering::Release);
         if control.gpu_headroom != driver.control.gpu_headroom {
             driver.gpu_hold = None;
             if let Some(headroom) = control.gpu_headroom {

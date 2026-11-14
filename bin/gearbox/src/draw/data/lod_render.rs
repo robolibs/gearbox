@@ -253,6 +253,8 @@ pub(in crate::draw::data) struct Page {
     pub selected: u64,
     /// A full page's slot in the view's LOD buffers.
     pub slot: Option<u32>,
+    /// The slot held another page's node states before this page took it.
+    pub fresh: AtomicBool,
     /// A full page's draw bind group, and its LOD pass slot groups with and without the
     /// accept dispatch arguments.
     pub group: Option<BindGroup>,
@@ -284,7 +286,8 @@ impl Page {
     }
 }
 
-/// One page as a view draws it: instances `range` of its `tier` records, placed by `world`.
+/// One page as a view draws it, placed by `world`: coarse records `range`, or the full
+/// records its view's LOD pass listed.
 pub(in crate::draw::data) struct Drawn<'a> {
     pub entity: Entity,
     pub key: lod::PageKey,
@@ -300,6 +303,8 @@ struct Bundle {
     datasets: Arc<DatasetSet>,
     request: Request,
     pages: List<Page>,
+    /// The LOD buffers its full pages are bound to.
+    lod: Option<Arc<ViewLod>>,
     _charge: Charge,
 }
 
@@ -348,7 +353,8 @@ struct State {
     identity: ViewIdentity,
     active: Option<Bundle>,
     pending: Option<Bundle>,
-    lod: Option<ViewLod>,
+    /// The newest LOD buffers, which pending pages bind to while the active ones keep theirs.
+    lod: Option<Arc<ViewLod>>,
     /// A page of `pending` was refused GPU memory since it was last checked.
     starved: AtomicBool,
     /// Most `pending` pages seen ready, and refused updates since that last grew.
@@ -436,20 +442,27 @@ impl Views {
         }
     }
 
-    /// Per page of the active bundle: points it represents and selects, GPU pages as their
-    /// view's LOD pass last read them back.
+    /// Points each drawn page represents and selects: the full pages the last read-back LOD
+    /// pass listed with the threshold bin it chose, then the active bundle's coarse pages.
     #[cfg(feature = "draw-probes")]
-    fn page_counts(state: &State) -> impl Iterator<Item = (u64, u64)> + '_ {
-        let last = state.lod.as_ref().map(|lod| lod.last.lock().unwrap().clone()).unwrap_or_default();
-        state.active.iter().flat_map(|bundle| bundle.pages.iter()).map(move |page| match page.slot {
-            Some(slot) => last.get(slot as usize).map_or((0, 0), |head| {
-                (u64::from(head.represented), u64::from(head.accepted))
-            }),
-            None => (
-                page.geometry.upgrade().map_or(0, |geometry| geometry.len() as u64),
-                page.selected,
-            ),
-        })
+    fn page_counts(state: &State) -> impl Iterator<Item = (u64, u64, Option<u32>)> + '_ {
+        let active = state.active.as_ref();
+        let listed = active
+            .and_then(|bundle| bundle.lod.as_ref())
+            .map(|lod| lod.last.lock().unwrap().clone())
+            .unwrap_or_default();
+        let full = listed.heads().map(|head| {
+            (u64::from(head.represented), u64::from(head.accepted), Some(head.chosen))
+        });
+        let coarse = active
+            .into_iter()
+            .flat_map(|bundle| bundle.pages.iter())
+            .filter(|page| page.tier == Tier::Coarse)
+            .map(|page| {
+                let represented = page.geometry.upgrade().map_or(0, |geometry| geometry.len() as u64);
+                (represented, page.selected, None)
+            });
+        full.collect::<Vec<_>>().into_iter().chain(coarse)
     }
 
     #[cfg(feature = "draw-probes")]
@@ -464,8 +477,14 @@ impl Views {
                     .iter()
                     .map(|data| data.generation.counts().valid_samples)
                     .sum::<u64>();
-                let (represented, selected) = Self::page_counts(state)
-                    .fold((0, 0), |(r, s), (page_r, page_s)| (r + page_r, s + page_s));
+                let (mut represented, mut selected, mut limited) = (0, 0, 0);
+                let mut chosen = None;
+                for (page_r, page_s, page_chosen) in Self::page_counts(state) {
+                    represented += page_r;
+                    selected += page_s;
+                    limited += u64::from(page_chosen.is_some_and(gpu::budget_limited));
+                    chosen = chosen.max(page_chosen);
+                }
                 probe.lod(
                     *view,
                     super::super::probe::LodReport {
@@ -473,9 +492,8 @@ impl Views {
                         represented,
                         selected,
                         culled: valid.saturating_sub(represented),
-                        pending_branches: 0,
-                        budget_limited_branches: 0,
-                        max_error_px: None,
+                        budget_limited_pages: limited,
+                        max_error_px: chosen.map(gpu::threshold_px),
                         pages: active.pages.len() as u64,
                         preparing: state.pending.is_some(),
                         coarse: active.coarse(),
@@ -496,13 +514,16 @@ impl Views {
         }
     }
 
-    /// GPU bytes of the views' level-of-detail buffers.
+    /// GPU bytes of the views' level-of-detail buffers, the newest and the active bundle's.
     #[cfg(feature = "draw-probes")]
-    pub(super) fn index_bytes(&self) -> u64 {
+    pub(super) fn lod_view_bytes(&self) -> u64 {
         self.states
             .values()
-            .filter_map(|state| state.lod.as_ref())
-            .map(|lod| lod.heads.buffer.size() + lod.tables.buffer.size())
+            .map(|state| {
+                let active = state.active.as_ref().and_then(|bundle| bundle.lod.as_ref());
+                let newest = state.lod.as_ref().filter(|lod| active.is_none_or(|active| !Arc::ptr_eq(active, lod)));
+                active.into_iter().chain(newest).map(|lod| lod.bytes()).sum::<u64>()
+            })
             .sum()
     }
 
@@ -511,7 +532,7 @@ impl Views {
         self.states
             .values()
             .flat_map(Self::page_counts)
-            .map(|(_, selected)| selected)
+            .map(|(_, selected, _)| selected)
             .sum()
     }
 
@@ -648,15 +669,28 @@ impl Views {
         &self,
         key: RetainedViewEntity,
     ) -> Option<(&ViewLod, impl Iterator<Item = &Page>)> {
-        let state = self.states.get(&key)?;
-        let lod = state.lod.as_ref()?;
-        let pages = state.active.as_ref()?.pages.iter().filter(|page| page.indexed());
-        Some((lod, pages))
+        let active = self.states.get(&key)?.active.as_ref()?;
+        let lod = active.lod.as_deref()?;
+        Some((lod, active.pages.iter().filter(|page| page.indexed())))
     }
 
-    /// The heads buffer a view's full pages draw their indirect arguments from.
+    /// What a pick on `key` resolves against: nothing more when the view draws no full pages,
+    /// otherwise its node tables read back after `asked`, or None while it waits for them.
+    pub(in crate::draw::data) fn pick_tables(
+        &self,
+        key: RetainedViewEntity,
+        asked: &mut Option<u64>,
+    ) -> Option<Option<Arc<gpu::Tables>>> {
+        let lod = self.states.get(&key).and_then(|state| state.active.as_ref()?.lod.as_ref());
+        match lod {
+            None => Some(None),
+            Some(lod) => lod.pick_tables(asked).map(Some),
+        }
+    }
+
+    /// The heads buffer a view's active full pages draw their indirect arguments from.
     pub(super) fn heads(&self, key: RetainedViewEntity) -> Option<&Buffer> {
-        Some(&self.states.get(&key)?.lod.as_ref()?.heads.buffer)
+        Some(&self.states.get(&key)?.active.as_ref()?.lod.as_ref()?.heads.buffer)
     }
 
     /// Every page drawn for `key` this frame with its tier records and placement.
@@ -674,10 +708,7 @@ impl Views {
                         key: page.key,
                         tier: page.tier,
                         dataset: &page.dataset,
-                        range: match page.tier {
-                            Tier::Full => 0..geometry.len() as u32,
-                            Tier::Coarse => page.range.clone(),
-                        },
+                        range: page.range.clone(),
                         geometry,
                         appearance: page.appearance.upgrade()?,
                         world: placement.world,
@@ -758,7 +789,12 @@ impl Views {
             return Ok(());
         }
         let request = request(budget, view, &datasets, nodes).map_err(|_| Issue::CpuBudget)?;
-        let bundle = build(budget, datasets, request, nodes, |key| admission.tier(key))?;
+        #[cfg(feature = "draw-probes")]
+        let held = shared.probe.as_ref().is_some_and(|probe| probe.holds_full());
+        #[cfg(not(feature = "draw-probes"))]
+        let held = false;
+        let tier = |key| if held { Tier::Coarse } else { admission.tier(key) };
+        let bundle = build(budget, datasets, request, nodes, tier, state.active.as_ref())?;
         if let Some(active) = &mut state.active
             && same_datasets(&active.datasets, &bundle.datasets)
             && active.pages.len() == bundle.pages.len()
@@ -813,23 +849,22 @@ impl Views {
         };
         let wanted = state.pending.as_ref().map_or(0, Bundle::slots);
         if state.lod.as_ref().is_none_or(|lod| lod.capacity < wanted) {
-            state.lod = Some(ViewLod::new(device, queue, shared, lod_pipelines, pipelines, wanted)?);
-            // Groups bound to the old buffers would draw stale tables.
-            if let Some(active) = &mut state.active {
-                for page in active.pages.iter_mut() {
+            // The active bundle keeps drawing from its own buffers; pending pages rebind.
+            state.lod = Some(Arc::new(ViewLod::new(device, queue, shared, lod_pipelines, pipelines, wanted)?));
+            if let Some(pending) = &mut state.pending {
+                for page in pending.pages.iter_mut() {
                     page.group = None;
                     page.lod_group = None;
                     page.accept_group = None;
                 }
             }
-            state.active = None;
         }
-        let lod = state.lod.as_ref().unwrap();
-        let Some(page) = state
-            .pending
-            .as_mut()
-            .and_then(|bundle| bundle.pages.get_mut(item as usize))
-        else {
+        let lod = state.lod.clone().unwrap();
+        let Some(bundle) = state.pending.as_mut() else {
+            return Err(Issue::Deferred);
+        };
+        bundle.lod = Some(lod.clone());
+        let Some(page) = bundle.pages.get_mut(item as usize) else {
             return Err(Issue::Deferred);
         };
         if !page.dataset.lifetime.is_live() {
@@ -848,7 +883,7 @@ impl Views {
             None => geometry,
         };
         let order = source.order.and_then(|key| cache.orders.get(&key)).ok_or(Issue::Deferred)?;
-        let [head, table, dispatch] = lod.slot(slot);
+        let [head, table, dispatch, states] = lod.slot(slot);
         page.group = Some(device.create_bind_group(
             "cloud lod page",
             &pipelines.get_bind_group_layout(&pipeline.page_selected),
@@ -863,7 +898,7 @@ impl Views {
         page.lod_group = Some(device.create_bind_group(
             "cloud lod slot",
             &pipelines.get_bind_group_layout(&lod_pipelines.slot),
-            &BindGroupEntries::sequential((head.clone(), table.clone(), dispatch)),
+            &BindGroupEntries::sequential((head.clone(), table.clone(), dispatch, states)),
         ));
         page.accept_group = Some(device.create_bind_group(
             "cloud lod accept slot",
@@ -910,13 +945,15 @@ fn request(
     })
 }
 
-/// Every placed page `request` sees, newest generation per key, at its admitted tier.
+/// Every placed page `request` sees, newest generation per key, at its admitted tier. Full
+/// pages keep the LOD slot they held in `previous`, so their node states carry over.
 fn build(
     budget: &CpuBudget,
     datasets: Arc<DatasetSet>,
     request: Request,
     nodes: &Query<(Entity, &MainEntity, &Node)>,
     admitted: impl Fn(lod::PageKey) -> Tier,
+    previous: Option<&Bundle>,
 ) -> Result<Bundle, Issue> {
     let charge = super::super::worker::charge(budget, size_of::<Bundle>() + 16)
         .map_err(|_| Issue::CpuBudget)?;
@@ -938,16 +975,16 @@ fn build(
         let (_, _, node) = nodes.get(*entity).map_err(|_| Issue::Deferred)?;
         let geometry = &node.page.appearance.geometry;
         let full = admitted(*key) == Tier::Full && geometry.resident();
-        let (tier, range, selected, slot) = if full {
+        let (tier, range, selected) = if full {
             slots += 1;
-            (Tier::Full, 0..0, 0, Some(slots - 1))
+            (Tier::Full, 0..0, 0)
         } else {
             let ordinals = &geometry.coarse.ordinals.values;
             let accepted = ordinals
                 .iter()
                 .filter(|ordinal| node.page.clip.accepts(geometry, **ordinal))
                 .count() as u64;
-            (Tier::Coarse, 0..ordinals.len() as u32, accepted, None)
+            (Tier::Coarse, 0..ordinals.len() as u32, accepted)
         };
         pages
             .push(Page {
@@ -956,7 +993,8 @@ fn build(
                 dataset: node.dataset.clone(),
                 range,
                 selected,
-                slot,
+                slot: None,
+                fresh: AtomicBool::new(false),
                 group: None,
                 lod_group: None,
                 accept_group: None,
@@ -968,12 +1006,50 @@ fn build(
             })
             .map_err(|_| Issue::CpuBudget)?;
     }
+    assign_slots(budget, &mut pages, slots, previous)?;
     Ok(Bundle {
         datasets,
         request,
         pages,
+        lod: None,
         _charge: charge,
     })
+}
+
+/// Gives each full page of `pages` one of `slots` LOD slots: the one it held in `previous`
+/// when that page drew the same geometry there, otherwise a free one marked fresh.
+fn assign_slots(
+    budget: &CpuBudget,
+    pages: &mut List<Page>,
+    slots: u32,
+    previous: Option<&Bundle>,
+) -> Result<(), Issue> {
+    let mut taken = List::new(budget, slots as usize, MemoryClass::Scratch).map_err(|_| Issue::CpuBudget)?;
+    for _ in 0..slots {
+        taken.push(false).map_err(|_| Issue::CpuBudget)?;
+    }
+    let held = |page: &Page| {
+        let old = previous?.pages.binary_search_by_key(&page.key, |old| old.key).ok();
+        let old = &previous?.pages[old?];
+        let slot = old.slot.filter(|slot| *slot < slots && Weak::ptr_eq(&old.geometry, &page.geometry))?;
+        Some(slot)
+    };
+    for page in pages.iter_mut().filter(|page| page.tier == Tier::Full) {
+        if let Some(slot) = held(page).filter(|slot| !taken[*slot as usize]) {
+            taken[slot as usize] = true;
+            page.slot = Some(slot);
+        }
+    }
+    let mut free = 0;
+    for page in pages.iter_mut().filter(|page| page.tier == Tier::Full && page.slot.is_none()) {
+        while taken[free as usize] {
+            free += 1;
+        }
+        taken[free as usize] = true;
+        page.slot = Some(free);
+        *page.fresh.get_mut() = true;
+    }
+    Ok(())
 }
 
 fn same_datasets(a: &Arc<DatasetSet>, b: &Arc<DatasetSet>) -> bool {
@@ -994,7 +1070,6 @@ fn view_request(view: &ExtractedView) -> lod::View {
             .as_dmat4(),
         viewport: [view.viewport.z, view.viewport.w],
         error_px: 1.5,
-        hysteresis: 0.15,
     }
 }
 

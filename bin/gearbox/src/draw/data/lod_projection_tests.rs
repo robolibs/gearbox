@@ -5,7 +5,6 @@ fn view(matrix: DMat4) -> View {
         clip_from_world: matrix,
         viewport: [1920, 1080],
         error_px: 1.5,
-        hysteresis: 0.15,
     }
 }
 

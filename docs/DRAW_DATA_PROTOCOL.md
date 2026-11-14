@@ -716,9 +716,14 @@ before its main pass:
 4. Clip-accepted points are counted on the GPU.
 
 The selection is a cut through each page's hierarchy: no point is drawn twice, and no part
-of a visible page is left out. Coarse pages draw every coarse record. A frame's receipt
-reads back the GPU counts after the submitted work completes, so `selected_items` stays
-exact. Picking considers every record of a drawn page.
+of a visible page is left out. Each node keeps the level it drew last frame, and a level it
+refined past stays refined until its error falls below 85% of the threshold. A view keeps
+last frame's threshold while only one bin (2^(1/4)) finer would fit its budget; the budget
+itself always holds. A page keeps its slot, and so its node states, while it stays in view.
+Coarse pages draw every coarse record. A frame's receipt reads back the GPU counts after the
+submitted work completes, so `selected_items` stays exact. A pick on a view with full pages
+asks its next LOD pass for a copy of the node tables and resolves against exactly the points
+that frame listed, usually a few frames after the click.
 
 The native roster excludes sensor cameras, supports window-backed interactive views
 and Gearbox's embedded ChaseCamera viewport, and preserves identity during temporary

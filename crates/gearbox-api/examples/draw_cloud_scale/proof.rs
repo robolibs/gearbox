@@ -11,6 +11,8 @@ mod quiescence;
 struct Allocations {
     positions: u64,
     attributes: u64,
+    indices: u64,
+    lod_views: u64,
     styles: u64,
     placements: u64,
     points: u64,
@@ -28,7 +30,7 @@ struct Allocations {
 
 impl Allocations {
     fn resident(&self) -> u64 {
-        self.positions + self.attributes + self.styles + self.placements
+        self.positions + self.attributes + self.indices + self.styles + self.placements
     }
     fn empty(&self) -> bool {
         self.resident() == 0 && self.gpu_bytes == 0 && self.points == 0 && self.pages == 0
@@ -38,11 +40,12 @@ impl Allocations {
             && self.pages == 16
             && self.positions == 12_000_000
             && self.attributes == 4_000_000
+            && self.indices > 4_000_000
             && self.styles > 0
             && self.styles < 65_536
             && self.placements > 0
             && self.placements < 65_536
-            && self.gpu_bytes == self.resident() + self.auxiliary_gpu_bytes
+            && self.gpu_bytes == self.resident() + self.lod_views + self.auxiliary_gpu_bytes
             && self.staging_gpu_bytes == 0
             && self.retiring_gpu_bytes == 0
             && self.other_gpu_bytes == 0
@@ -132,7 +135,8 @@ pub fn run(
     let current = status(data, &fixture.descriptor.key)?;
     require(
         current.failure.is_none()
-            && current.resources.gpu_bytes == allocated.resident() + allocated.auxiliary_gpu_bytes,
+            && current.resources.gpu_bytes
+                == allocated.resident() + allocated.lod_views + allocated.auxiliary_gpu_bytes,
         "public status disagrees with live buffers",
     )?;
     record(

@@ -111,8 +111,8 @@ fn settled(report: &Report, revision: DatasetRevision, points: u64, after: u64) 
                 }
         })
     }) && number(&report.allocations, "points") == points
-        && number(&report.allocations, "positions") == points * 16
-        && number(&report.allocations, "attributes") == points * 32
+        && number(&report.allocations, "positions") == points * 12
+        && number(&report.allocations, "attributes") == 0
         && number(&report.allocations, "retiring_gpu_bytes") == 0
         && number(&report.allocations, "staging_gpu_bytes") == 0
 }
@@ -188,9 +188,16 @@ pub(super) fn run(
         ("evicted-again", 0.0, 0),
         ("reloaded-left", -200.0, u64::from(BANK)),
     ] {
+        // A turn to the other bank draws its coarse tier, held until it is captured.
+        let direct = name.starts_with("direct-");
+        if direct {
+            control.hold_full = true;
+            control.set("configure", true, 0)?;
+        }
         camera(&instance, east)?;
-        if name.starts_with("direct-") {
+        if direct {
             let coarse_name = name.replace("direct-", "coarse-");
+            let bank = u64::from(east > 0.0);
             let report = control.wait(&coarse_name, |report| {
                 report.completed.iter().enumerate().all(|(index, stamp)| {
                     stamp.is_some_and(|stamp| {
@@ -199,6 +206,7 @@ pub(super) fn run(
                             && stamp.generation == revision.generation
                             && stamp.selected_items > 0
                             && report.lod[index]["coarse"].as_bool() == Some(true)
+                            && source_bank(&report.lod[index], bank)
                     })
                 })
             })?;
@@ -213,13 +221,12 @@ pub(super) fn run(
             )?;
             require(
                 number(&report.allocations, "coarse_positions")
-                    == u64::from(BANK / PAGE) * 256 * 16,
+                    == u64::from(BANK / PAGE) * 256 * 12,
                 "coarse positions retained full source pages",
             )?;
             require(
-                number(&report.allocations, "coarse_attributes")
-                    == u64::from(BANK / PAGE) * 256 * 32,
-                "coarse attributes retained full source pages",
+                number(&report.allocations, "coarse_attributes") == 0,
+                "constant-colour coarse records hold no attribute words",
             )?;
             require(
                 number(&report.uploads, "coarse_positions") > 0,
@@ -233,6 +240,7 @@ pub(super) fn run(
                         views.len() == 2
                             && views.iter().all(|view| {
                                 view["coarse"].as_bool() == Some(true)
+                                    && source_bank(view, bank)
                                     && view["selected"].as_u64()
                                         == Some(u64::from(BANK / PAGE) * 256)
                             })
@@ -241,6 +249,8 @@ pub(super) fn run(
             )?;
             check(&captured, &limits)?;
             transitions.push(captured);
+            control.hold_full = false;
+            control.set("configure", true, 0)?;
         }
         std::thread::sleep(Duration::from_millis(500));
         let report = control.wait(name, |report| settled(report, revision, points, frame + 5))?;
@@ -255,17 +265,17 @@ pub(super) fn run(
             "evicted source-page counter differs from exact residency",
         )?;
         require(
-            number(&report.allocations, "demanded_position_bytes") == points * 16,
+            number(&report.allocations, "demanded_position_bytes") == points * 12,
             "source residency differs from selected-page demand",
         )?;
         let uploads = number(&report.uploads, "positions");
         require(
-            uploads - previous_uploads == points * 16,
+            uploads - previous_uploads == points * 12,
             "source reload bytes differ from the requested bank",
         )?;
         require(
-            number(&report.uploads, "attributes") == uploads * 2,
-            "position/attribute residency diverged",
+            number(&report.uploads, "attributes") == 0,
+            "constant-colour pages uploaded attribute words",
         )?;
         let bytes = number(&report.cpu, "page_bytes");
         require(
@@ -338,11 +348,10 @@ pub(super) fn run(
             number(&report.allocations, "pages")
                 == full.iter().sum::<u64>() + number(&report.allocations, "coarse_pages")
                 && number(&report.allocations, "positions")
-                    == full.iter().sum::<u64>() * u64::from(PAGE) * 16
+                    == full.iter().sum::<u64>() * u64::from(PAGE) * 12
                         + number(&report.allocations, "coarse_positions")
-                && number(&report.allocations, "attributes")
-                    == full.iter().sum::<u64>() * u64::from(PAGE) * 32
-                        + number(&report.allocations, "coarse_attributes"),
+                && number(&report.allocations, "attributes") == 0
+                && number(&report.allocations, "coarse_attributes") == 0,
             "divergent banks overlap or retain unused full pages",
         )?;
         for view in report.lod.as_array().unwrap() {

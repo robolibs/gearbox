@@ -11,7 +11,7 @@ from draw_multiview_images import classify
 def verify_fine(view):
     assert view["coarse"] is False and view["preparing"] is False, view
     assert 12_288 < view["selected"] <= 1_000_000, view
-    assert view["pending_branches"] == view["budget_limited_branches"] == 0, view
+    assert view["budget_limited_pages"] == 0, view
     assert view["valid"] == 6_291_456, view
     assert view["represented"] == view["culled"] == 3_145_728, view
     assert view["verified_ordinals"] is True, view
@@ -22,13 +22,13 @@ def verify_fine(view):
 
 def self_test():
     good = dict(coarse=False, preparing=False, selected=200_000,
-                pending_branches=0, budget_limited_branches=0,
+                budget_limited_pages=0,
                 valid=6_291_456, represented=3_145_728, culled=3_145_728,
                 verified_ordinals=True, max_error_px=1.7)
     verify_fine(good)
     invalid = [("coarse", True), ("preparing", True), ("selected", 0),
                ("selected", 12_288), ("selected", 1_000_001),
-               ("pending_branches", 1), ("budget_limited_branches", 1),
+               ("budget_limited_pages", 1),
                ("valid", 0), ("represented", 0), ("culled", 0),
                ("verified_ordinals", False), ("max_error_px", None),
                ("max_error_px", float("nan")), ("max_error_px", float("inf")),
@@ -39,7 +39,7 @@ def self_test():
         except AssertionError:
             continue
         raise AssertionError(("invalid fine cut accepted", field, value))
-    print("fine-cut quality oracle: valid cut and 16 rejection cases passed")
+    print("fine-cut quality oracle: valid cut and 15 rejection cases passed")
 
 
 def verify(root):

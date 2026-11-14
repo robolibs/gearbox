@@ -27,7 +27,7 @@ pid=$(jq -r .pid "$out/instance.json")
 sha256sum "$bin" "/proc/$pid/exe" > "$out/binary.sha256"
 [[ $(sha256sum "$bin" | cut -d' ' -f1) == $(sha256sum "/proc/$pid/exe" | cut -d' ' -f1) ]]
 bash "$root/scripts/capture-draw-data-views.sh" "$out/views" cloud-scale
-jq -e '.result == "pass" and .allocations.positions == 16000000 and .allocations.attributes == 32000000 and .allocations.points == 1000000' "$out/reload.json" >/dev/null
+jq -e '.result == "pass" and .allocations.positions == 12000000 and .allocations.attributes == 4000000 and .allocations.points == 1000000' "$out/reload.json" >/dev/null
 jq -e '.result == "pass" and (.deltas | length) == 2 and .deltas[0].page.items == 65536 and .deltas[1].page.items == 16960' "$out/page-delta.json" >/dev/null
 kill -0 "$pid"
 printf 'Integrated million-point gate passed; owned survey preview remains open: %s\n' "$instance"

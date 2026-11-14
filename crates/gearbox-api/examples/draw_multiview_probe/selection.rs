@@ -1,6 +1,17 @@
 use super::*;
 
 const POINTS: u32 = 2048;
+/// One view's LOD buffers with one page slot: view uniform, bins, head, dispatch, node
+/// states, four head readbacks, the node table and its pick copy.
+const VIEW_LOD_BYTES: u64 = 80 + 656 + 7 * 256 + 2 * 4096;
+/// Bytes of one hierarchy node in a page's LOD tree.
+const TREE_NODE_BYTES: u64 = 80;
+
+/// The page's refinement order (a u32 per point) and a whole number of tree nodes.
+fn tree_and_order(bytes: u64) -> bool {
+    let order = u64::from(POINTS) * 4;
+    bytes > order && (bytes - order) % TREE_NODE_BYTES == 0
+}
 
 fn number(value: &serde_json::Value, field: &str) -> u64 {
     value[field].as_u64().expect("required selection counter")
@@ -141,12 +152,16 @@ pub(super) fn run(
     let first = clusters(writer, &key, None, [255, 24, 24, 255])?;
     let initial = control.wait("indexed-initial", |report| ready(report, first))?;
     require(
-        number(&initial.allocations, "indices") == 16,
-        "two views must each own two u32 ordinals",
+        tree_and_order(number(&initial.uploads, "indices")),
+        "the page uploads exactly its LOD tree and refinement order",
     )?;
     require(
-        number(&initial.uploads, "indices") == 16,
-        "initial ordinal uploads must be exact",
+        number(&initial.allocations, "indices") == number(&initial.uploads, "indices"),
+        "both views share the page's one LOD tree and refinement order",
+    )?;
+    require(
+        number(&initial.allocations, "lod_views") == 2 * VIEW_LOD_BYTES,
+        "each view owns one page slot of LOD buffers",
     )?;
     require(
         number(&initial.allocations, "selected_points") == 4,
@@ -175,7 +190,7 @@ pub(super) fn run(
     for field in ["positions", "attributes", "indices"] {
         require(
             number(&restyled.uploads, field) == number(&initial.uploads, field),
-            "constant color changes must not reupload source records or selection indices",
+            "constant color changes must not reupload source records or LOD trees",
         )?;
     }
     control.capture("indexed-restyled", 0, ["blue", "blue"])?;
@@ -209,17 +224,21 @@ pub(super) fn run(
         ready(report, third)
     })?;
     require(
-        number(&recovered.uploads, "indices") == 32,
-        "replacement geometry needs exactly two new ordinal buffers",
+        number(&recovered.uploads, "indices") == 2 * number(&initial.uploads, "indices"),
+        "replacement geometry uploads exactly one new LOD tree and refinement order",
     )?;
     require(
-        number(&recovered.allocations, "indices") == 16,
-        "superseded ordinal buffers must retire",
+        number(&recovered.allocations, "indices") == number(&initial.allocations, "indices"),
+        "the superseded LOD tree and refinement order must retire",
+    )?;
+    require(
+        number(&recovered.allocations, "lod_views") == 2 * VIEW_LOD_BYTES,
+        "replacement keeps each view's one page slot",
     )?;
     require(
         number(&recovered.allocations, "max_frame_upload")
             <= data.capabilities().limits.upload_bytes_per_frame,
-        "index uploads exceeded the shared frame cap",
+        "LOD tree uploads exceeded the shared frame cap",
     )?;
     control.capture("indexed-replacement-recovered", 0, ["magenta", "magenta"])?;
     control.gpu_headroom = Some(0);
@@ -228,6 +247,7 @@ pub(super) fn run(
     clear(data, writer.lease())?;
     let released = control.wait("indexed-clear-under-pressure", |report| {
         number(&report.allocations, "indices") == 0
+            && number(&report.allocations, "lod_views") == 0
             && number(&report.allocations, "positions") == 0
             && number(&report.allocations, "attributes") == 0
             && number(&report.allocations, "retiring_gpu_bytes") == 0
@@ -256,6 +276,14 @@ pub(super) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lod_uploads_hold_the_refinement_order_and_whole_tree_nodes() {
+        assert!(tree_and_order(u64::from(POINTS) * 4 + 3 * TREE_NODE_BYTES));
+        assert!(!tree_and_order(u64::from(POINTS) * 4));
+        assert!(!tree_and_order(u64::from(POINTS) * 4 + TREE_NODE_BYTES / 2));
+        assert!(!tree_and_order(16));
+    }
 
     #[test]
     fn blocked_replacement_keeps_old_active_cut_but_is_not_a_settled_new_cut() {

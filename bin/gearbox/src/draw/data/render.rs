@@ -899,13 +899,13 @@ fn observe_allocations(
             demanded_position_bytes: selections.demanded_position_bytes(),
             page_loads: cache.page_loads,
             evicted_pages: cache.evicted_pages,
-            indices: selections.index_bytes()
-                + cache
-                    .trees
-                    .values()
-                    .chain(cache.orders.values())
-                    .map(|storage| storage.buffer.buffer.size())
-                    .sum::<u64>(),
+            indices: cache
+                .trees
+                .values()
+                .chain(cache.orders.values())
+                .map(|storage| storage.buffer.buffer.size())
+                .sum(),
+            lod_views: selections.lod_view_bytes(),
             selected_points: selections.selected_points(),
             positions: cache
                 .geometry

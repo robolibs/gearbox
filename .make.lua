@@ -245,10 +245,11 @@ make.recipe{ name = "test-draw-cloud", desc = "test compact cloud records, valid
              run = function() sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::", "--", "--test-threads=1") end }
 make.recipe{ name = "test-draw-cloud-hierarchy", desc = "verify deterministic source-preserving spatial pages, bounded construction and cancellation",
              run = function() sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::hierarchy::", "--", "--test-threads=1") end }
-make.recipe{ name = "test-draw-cloud-lod", desc = "verify global cloud selection budgets, projection, hysteresis and ready cuts",
-             run = function() sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::lod::", "--", "--test-threads=1") end }
-make.recipe{ name = "test-draw-cloud-quality", desc = "verify curved paged-survey coverage under the unchanged point and scratch caps",
-             run = function() sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::lod::quality_tests::", "--", "--test-threads=1", "--nocapture") end }
+make.recipe{ name = "test-draw-cloud-lod", desc = "verify page sets, LOD slots and picks on the CPU, and GPU cuts, budgets and dead bands",
+             run = function()
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::render::selection::", "--", "--test-threads=1")
+               gpu("cargo", "test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::gpu_tests::lod::", "--", "--ignored", "--test-threads=1")
+             end }
 make.recipe{ name = "test-draw-cloud-selection", desc = "verify materialized per-view cloud draws and selection ownership",
              run = function()
                sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_multiview_probe", "selection::", "--", "--test-threads=1")
