@@ -31,6 +31,8 @@ mod tests;
 pub(super) const SLICE: u32 = 1 << 20;
 /// A slice cell whose support is unknown or unallocated.
 pub(super) const UNKNOWN: u32 = 1 << 21;
+/// A slice border quad: `quad.x` runs along its edge, drawn with corner brackets.
+pub(super) const FRAME: u32 = 1 << 4;
 /// Scan keys of slice pages: slice `s` uses `SLICE_SCAN - s`; its border uses page id `u64::MAX`.
 pub(super) const SLICE_SCAN: u64 = u64::MAX - 1;
 const BORDER_PAGE: u64 = u64::MAX;
@@ -169,7 +171,7 @@ fn border(slice: &VolumeSlice, rgba: [u8; 4]) -> Result<Vec<Cell>, StorageError>
     let center = DVec3::from_array(slice.center_m);
     let (u, v) = (DVec3::from_array(slice.u), DVec3::from_array(slice.v));
     let (a, b) = (slice.size_m[0] / 2.0, slice.size_m[1] / 2.0);
-    let width = slice.size_m[0].min(slice.size_m[1]) * 0.006;
+    let width = slice.size_m[0].min(slice.size_m[1]) * 0.03;
     let corners = [center - u * a - v * b, center + u * a - v * b, center + u * a + v * b, center - u * a + v * b];
     let mut cells = Vec::with_capacity(24);
     for k in 0..4 {
@@ -177,7 +179,7 @@ fn border(slice: &VolumeSlice, rgba: [u8; 4]) -> Result<Vec<Cell>, StorageError>
         let inward = (center - (p + q) / 2.0).normalize_or_zero() * width;
         let quad = [p, q, q + inward, p + inward];
         for n in [0, 1, 2, 0, 2, 3] {
-            cells.push(record(quad[n], center, rgba, 1.0, ARROW, -1.0)?);
+            cells.push(record(quad[n], center, rgba, 1.0, ARROW | FRAME, -1.0)?);
         }
     }
     Ok(cells)

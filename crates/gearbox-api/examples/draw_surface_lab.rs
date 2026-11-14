@@ -140,7 +140,7 @@ fn raw(writer: &mut DrawDataWriter<'_>, f: &Fixture, origin: [f64; 3]) -> Result
         shape: DataShape::Cloud { schema },
         stream: StreamMode::RetainedMap,
         lifetime_s: None,
-        presentation: Presentation { color: ColorMode::Constant { rgba: [215, 220, 230, 255] }, size: PointSize::Metres { radius: 0.02 }, ..Default::default() },
+        presentation: Presentation { color: ColorMode::Constant { rgba: [215, 220, 230, 255] }, size: PointSize::Metres { radius: 0.02 }, glow: 0.5, ..Default::default() },
     };
     let scan = ScanDescriptor {
         revision: SCHEMA_REVISION,
@@ -183,6 +183,7 @@ fn surfels(writer: &mut DrawDataWriter<'_>, f: &Fixture, origin: [f64; 3]) -> Re
         presentation: Presentation {
             color: ColorMode::Scalar { name: "confidence".into(), colormap: colormap::VIRIDIS, range: [0.0, 1.0], missing: [120, 120, 120, 255] },
             normals: Some(NormalArrows { every: 9, length_m: 0.35, rgba: [255, 240, 200, 255] }),
+            glow: 0.6,
             ..Default::default()
         },
     };
@@ -224,6 +225,8 @@ fn mesh(writer: &mut DrawDataWriter<'_>, f: &Fixture, origin: [f64; 3]) -> Resul
         lifetime_s: None,
         presentation: Presentation {
             color: ColorMode::Scalar { name: "confidence".into(), colormap: colormap::VIRIDIS, range: [0.0, 1.0], missing: [120, 120, 120, 255] },
+            glow: 0.6,
+            opacity: 0.75,
             ..Default::default()
         },
     };

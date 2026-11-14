@@ -416,6 +416,13 @@ fn spawn_world(
     let mut camera = commands.spawn((
         Name::new("Camera"),
         Camera3d::default(),
+        // Only light far above the lit scene blooms: hologram emission, the sun disc.
+        bevy::post_process::bloom::Bloom {
+            intensity: 0.22,
+            prefilter: bevy::post_process::bloom::BloomPrefilter { threshold: 2.2, threshold_softness: 0.35 },
+            composite_mode: bevy::post_process::bloom::BloomCompositeMode::Additive,
+            ..bevy::post_process::bloom::Bloom::NATURAL
+        },
         bevy::pbr::ScreenSpaceTransmission::default(),
         bevy::render::view::NoIndirectDrawing,
         // Clustered only while point or spot lights stand in the scene

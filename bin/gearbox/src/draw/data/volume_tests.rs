@@ -164,7 +164,7 @@ fn an_unchanged_group_keeps_its_buffer_and_a_changed_one_does_not() {
 fn a_slice_border_is_four_unlit_unpickable_quads() {
     let cells = border(&vertical(), [255, 255, 255, 255]).unwrap();
     assert_eq!(cells.len(), 24);
-    assert!(cells.iter().all(|c| c.code & ARROW != 0 && c.code & SLICE == 0));
+    assert!(cells.iter().all(|c| c.code & ARROW != 0 && c.code & FRAME != 0 && c.code & SLICE == 0));
 }
 
 #[test]

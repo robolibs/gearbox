@@ -128,6 +128,7 @@ fn descriptor(id: &str, grid: &ElevationGrid, origin: [f64; 3], layer: &str, map
         lifetime_s: None,
         presentation: Presentation {
             color: ColorMode::Scalar { name: layer.into(), colormap: map, range, missing: MISSING },
+            glow: 0.5,
             ..Default::default()
         },
     })

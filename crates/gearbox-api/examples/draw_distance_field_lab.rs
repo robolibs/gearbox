@@ -164,7 +164,7 @@ fn volume(key: &str, field: &VolumeField, origin: [f64; 3], radius: f64, color: 
         shape: DataShape::Volume { field: field.clone(), frame: DataFrame { origin_m: origin, ground_radius_m: Some(radius), ..Default::default() } },
         stream: StreamMode::RetainedMap,
         lifetime_s: None,
-        presentation: Presentation { color, volume: Some(view), ..Default::default() },
+        presentation: Presentation { color, volume: Some(view), glow: 0.5, ..Default::default() },
     })
 }
 
@@ -280,7 +280,7 @@ fn main() -> Result<()> {
         shape: DataShape::MeshBlocks { frame: DataFrame { origin_m: origin(10.0, 0.0), ground_radius_m: Some(2.3), ..Default::default() } },
         stream: StreamMode::RetainedMap,
         lifetime_s: None,
-        presentation: Presentation { color: ColorMode::Constant { rgba: [140, 190, 235, 255] }, ..Default::default() },
+        presentation: Presentation { color: ColorMode::Constant { rgba: [140, 190, 235, 255] }, glow: 0.6, opacity: 0.75, ..Default::default() },
     };
     let page = PageDescriptor {
         address: PageAddress { scan_key: 0, page_id: 0 },

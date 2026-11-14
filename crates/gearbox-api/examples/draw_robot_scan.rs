@@ -200,6 +200,8 @@ fn supplied_map() -> Result<(DataDescriptor, Vec<(PageDescriptor, Vec<u8>)>)> {
         lifetime_s: None,
         presentation: Presentation {
             octree: Some(OctreeDisplay { show_free: true, ..OctreeDisplay::default() }),
+            glow: 0.6,
+            opacity: 0.65,
             ..Presentation::for_octree()
         },
     };

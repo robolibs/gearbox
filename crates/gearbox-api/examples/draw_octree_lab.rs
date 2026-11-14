@@ -165,6 +165,8 @@ fn bays() -> Vec<Bay> {
             detail: "WALL / FREE CORRIDOR / UNKNOWN GAP / LIVE SPLIT",
             presentation: Presentation {
                 octree: Some(display.clone()),
+                glow: 0.6,
+                opacity: 0.65,
                 ..Presentation::for_octree()
             },
         },
@@ -185,6 +187,8 @@ fn bays() -> Vec<Bay> {
                     style: VoxelStyle::Surface,
                     ..display.clone()
                 }),
+                glow: 0.6,
+                opacity: 0.65,
                 ..Presentation::for_octree()
             },
         },
@@ -200,6 +204,8 @@ fn bays() -> Vec<Bay> {
                     show_free: true,
                     ..OctreeDisplay::default()
                 }),
+                glow: 0.6,
+                opacity: 0.65,
                 ..Presentation::for_octree()
             },
         },
@@ -306,7 +312,8 @@ fn stress(
         stream: StreamMode::RetainedMap,
         lifetime_s: None,
         presentation: Presentation {
-            opacity: std::env::var("GEARBOX_OCTREE_OPACITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
+            opacity: std::env::var("GEARBOX_OCTREE_OPACITY").ok().and_then(|v| v.parse().ok()).unwrap_or(0.65),
+            glow: 0.6,
             ..Presentation::for_octree()
         },
     };
