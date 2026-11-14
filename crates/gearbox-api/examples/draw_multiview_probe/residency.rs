@@ -150,12 +150,13 @@ pub(super) fn run(
 ) -> Result<()> {
     let instance = std::env::args().nth(1).ok_or("missing owned instance")?;
     let limits = data.capabilities().limits.clone();
+    let reference = DataLimits::reference();
     require(
         limits.gpu_bytes == 256 << 20
-            && limits.cpu_bytes == 1 << 30
-            && limits.visible_points == 1_000_000
-            && limits.upload_bytes_per_frame == 4 << 20,
-        "residency requires unchanged reference limits",
+            && limits.cpu_bytes == reference.cpu_bytes
+            && limits.visible_points == reference.visible_points
+            && limits.upload_bytes_per_frame == reference.upload_bytes_per_frame,
+        "residency requires reference limits with GEARBOX_DRAW_GPU_BYTES=256 MiB",
     )?;
     require(
         u64::from(TOTAL) * 48 > limits.gpu_bytes,

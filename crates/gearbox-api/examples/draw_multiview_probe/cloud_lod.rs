@@ -268,10 +268,7 @@ pub(super) fn run(
     let instance = std::env::args().nth(1).ok_or("missing owned instance")?;
     let limits = data.capabilities().limits.clone();
     require(
-        limits.visible_points == 1_000_000
-            && limits.gpu_bytes == 256 << 20
-            && limits.cpu_bytes == 1 << 30
-            && limits.upload_bytes_per_frame == 4 << 20,
+        limits == DataLimits::reference(),
         "cloud LOD must use unchanged reference limits",
     )?;
     control.set("configure", true, 0)?;

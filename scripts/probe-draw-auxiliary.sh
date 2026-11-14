@@ -9,7 +9,7 @@ case "$mode" in
     upload-fairness) oracle=draw_upload_fairness_images.py ;;
     selection) oracle=draw_cloud_selection_images.py ;;
     cloud-lod) oracle=draw_cloud_lod_images.py ;;
-    residency) oracle=draw_cloud_residency_images.py ;;
+    residency) oracle=draw_cloud_residency_images.py; export GEARBOX_DRAW_GPU_BYTES=$((256 << 20)) ;;
     *) echo "Unknown resource probe: $mode" >&2; exit 2 ;;
 esac
 out=${1:-"$root/target/draw-vfx/cloud-auxiliary/native"}

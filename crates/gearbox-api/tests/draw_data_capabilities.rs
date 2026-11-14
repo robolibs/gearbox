@@ -38,12 +38,13 @@ fn byte_budgets_and_counts_are_positive_nested_and_hard_bounded() {
         let limits: DataLimits = serde_json::from_value(value).unwrap();
         assert!(limits.validate().is_err(), "zero {field}");
     }
+    let reference = DataLimits::reference();
     for (field, value) in [
         ("writer_incomplete_bytes", 129u64 << 20),
-        ("incomplete_bytes", 2 << 30),
+        ("incomplete_bytes", reference.cpu_bytes + 1),
         ("page_bytes", MAX_ENCODED_PAGE_BYTES as u64 + 1),
         ("page_points", 65_537),
-        ("upload_bytes_per_frame", 257 << 20),
+        ("upload_bytes_per_frame", reference.gpu_bytes + 1),
         ("writer_transactions", 65),
         ("chunk_bytes", DATA_CHUNK_BYTES as u64 + 1),
         ("scans", u64::from(MAX_SCANS) + 1),

@@ -122,10 +122,10 @@ presentation updates, find the current revision with a `STATUS` request on
   - `EXPIRED`: the writer lease timed out after 10 s idle; open a new writer.
   - `STALE_EPOCH`: the host restarted; negotiate again.
   - `SUPERSEDED`: a field query named a generation that is no longer current.
-- **Profiles:** `reference` (1 GiB CPU, 256 MiB GPU, 1M visible points) and `low-memory`
+- **Profiles:** `reference` (4 GiB CPU, 2 GiB GPU, 1M visible points) and `low-memory`
   (`GEARBOX_DRAW_PROFILE=low-memory`: 128 MiB, 32 MiB, 100k points). The low-memory
   profile refuses oversized uploads and keeps the old generation; it never runs out of
-  memory.
+  memory. `GEARBOX_DRAW_GPU_BYTES` replaces the selected profile's GPU budget.
 - **Sensors:** no dataset of any kind appears in robot camera images.
 
 ## Moving from legacy drawings

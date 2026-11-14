@@ -54,8 +54,8 @@ impl Default for DataLimits {
 impl DataLimits {
     pub fn reference() -> Self {
         Self {
-            cpu_bytes: 1 << 30,
-            gpu_bytes: 256 << 20,
+            cpu_bytes: 4 << 30,
+            gpu_bytes: 2 << 30,
             incomplete_bytes: 128 << 20,
             writer_incomplete_bytes: 32 << 20,
             writer_staged_bytes: 256 << 20,

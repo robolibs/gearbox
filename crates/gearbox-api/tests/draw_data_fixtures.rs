@@ -132,9 +132,10 @@ fn acceptance_profiles_keep_subbudgets_inside_total_limits() {
         assert_eq!(bytes("warmup_seconds"), 10);
         assert_eq!(bytes("measurement_seconds"), 60);
     }
-    assert_eq!(profiles["reference"]["cpu_bytes"], 1_073_741_824u64);
-    assert_eq!(profiles["reference"]["gpu_bytes"], 268_435_456u64);
-    assert_eq!(profiles["reference"]["visible_points"], 1_000_000u64);
+    let reference = gearbox_api::wire::draw_data::DataLimits::reference();
+    assert_eq!(profiles["reference"]["cpu_bytes"], reference.cpu_bytes);
+    assert_eq!(profiles["reference"]["gpu_bytes"], reference.gpu_bytes);
+    assert_eq!(profiles["reference"]["visible_points"], u64::from(reference.visible_points));
 }
 
 #[test]

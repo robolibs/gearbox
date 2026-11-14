@@ -215,13 +215,21 @@ impl Drop for ServiceOwner {
     }
 }
 
-/// `GEARBOX_DRAW_PROFILE=low-memory` selects the low-memory acceptance profile.
+/// `GEARBOX_DRAW_PROFILE=low-memory` selects the low-memory acceptance profile;
+/// `GEARBOX_DRAW_GPU_BYTES` then replaces its GPU budget.
 impl Default for DrawingBackend {
     fn default() -> Self {
-        let limits = match std::env::var("GEARBOX_DRAW_PROFILE").as_deref() {
+        let mut limits = match std::env::var("GEARBOX_DRAW_PROFILE").as_deref() {
             Ok("low-memory") => DataLimits::low_memory(),
             _ => DataLimits::reference(),
         };
+        if let Some(bytes) = std::env::var("GEARBOX_DRAW_GPU_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|bytes| *bytes > 0)
+        {
+            limits.gpu_bytes = bytes;
+        }
         Self::new(limits).expect("default drawing backend")
     }
 }
