@@ -42,6 +42,8 @@ use super::{
 
 #[path = "lod_render.rs"]
 pub(in crate::draw::data) mod selection;
+#[path = "lod_gpu.rs"]
+pub(in crate::draw::data) mod gpu;
 
 pub(super) struct OwnedBuffer {
     pub buffer: Buffer,
@@ -67,6 +69,8 @@ enum Owner {
     Appearance(Arc<Appearance>),
     CoarseGeometry(Arc<super::cloud::SpatialMetadata>),
     CoarseAppearance(Arc<super::coarse::Samples>),
+    Tree(Arc<super::cloud::SpatialMetadata>),
+    Order(Arc<super::cloud::SpatialMetadata>),
 }
 impl Owner {
     fn bytes(&self) -> &[u8] {
@@ -75,6 +79,8 @@ impl Owner {
             Self::Appearance(value) => value.attributes.bytes(),
             Self::CoarseGeometry(value) => bytemuck::cast_slice(&value.coarse.positions.values),
             Self::CoarseAppearance(value) => value.attributes.bytes(),
+            Self::Tree(value) => bytemuck::cast_slice(&value.tree.values),
+            Self::Order(value) => bytemuck::cast_slice(&value.hierarchy.refinement.order.values),
         }
     }
 }
@@ -99,6 +105,10 @@ struct PageBuffer {
     appearance: Option<(usize, Tier)>,
     style: usize,
     count: u32,
+    /// Full pages: the refinement order's key, hierarchy nodes and LOD pass bind group.
+    order: Option<(usize, Tier)>,
+    nodes: u32,
+    lod: Option<BindGroup>,
 }
 
 #[derive(Resource, Default)]
@@ -107,6 +117,8 @@ struct Cache {
     evicted_pages: u64,
     geometry: Map<(usize, Tier), Storage>,
     appearance: Map<(usize, Tier), Storage>,
+    trees: Map<(usize, Tier), Storage>,
+    orders: Map<(usize, Tier), Storage>,
     styles: Map<usize, StyleBuffer>,
     pages: Map<(Entity, Tier), PageBuffer>,
     opaque: Map<RetainedViewEntity, List<(Entity, MainEntity)>>,
@@ -269,6 +281,7 @@ pub(super) fn install(app: &mut App) {
                 .chain()
                 .in_set(RenderSystems::QueueMeshes),),
         );
+    gpu::install(app);
     #[cfg(feature = "draw-probes")]
     app.sub_app_mut(RenderApp).add_systems(
         Render,
@@ -315,7 +328,7 @@ fn init(mut commands: Commands, mesh: Res<MeshPipeline>, assets: Res<AssetServer
             ),
         ),
         page_selected: BindGroupLayoutDescriptor::new(
-            "selected cloud page",
+            "cloud lod page",
             &BindGroupLayoutEntries::sequential(
                 ShaderStages::VERTEX_FRAGMENT,
                 (
@@ -323,6 +336,7 @@ fn init(mut commands: Commands, mesh: Res<MeshPipeline>, assets: Res<AssetServer
                     storage_buffer_read_only_sized(false, None),
                     storage_buffer_read_only_sized(false, None),
                     storage_buffer_read_only_sized(false, None),
+                    storage_buffer_read_only_sized(false, std::num::NonZeroU64::new(gpu::TABLE_BYTES)),
                 ),
             ),
         ),
@@ -356,8 +370,8 @@ impl SpecializedRenderPipeline for Pipeline {
         let fragment = descriptor.fragment.as_mut().unwrap();
         fragment.shader = self.shader.clone();
         if selected {
-            descriptor.vertex.shader_defs.push("CLOUD_SELECTED".into());
-            fragment.shader_defs.push("CLOUD_SELECTED".into());
+            descriptor.vertex.shader_defs.push("CLOUD_LOD".into());
+            fragment.shader_defs.push("CLOUD_LOD".into());
         }
         if opaque {
             fragment.shader_defs.push("CLOUD_OPAQUE".into());
@@ -389,6 +403,7 @@ pub(super) struct Prepare<'w, 's> {
     device: Res<'w, RenderDevice>,
     queue: Res<'w, RenderQueue>,
     pipeline: Res<'w, Pipeline>,
+    lod_pipelines: Option<Res<'w, gpu::LodPipelines>>,
     pipelines: Res<'w, PipelineCache>,
     images: Res<'w, RenderAssets<GpuImage>>,
 }
@@ -477,6 +492,15 @@ impl Prepare<'_, '_> {
                 .map(|(node, tier)| (Arc::as_ptr(&node.page.appearance) as usize, tier)),
             |_, _| {},
         );
+        let lod_keys = || {
+            selections
+                .sources()
+                .filter(|(_, tier)| *tier == Tier::Full)
+                .filter_map(|(entity, _)| nodes.get(entity).ok())
+                .map(|(_, node)| (Arc::as_ptr(&node.page.appearance.geometry.metadata) as usize, Tier::Full))
+        };
+        cache.trees.retain_keys(lod_keys(), |_, _| {});
+        cache.orders.retain_keys(lod_keys(), |_, _| {});
         cache.styles.retain_keys(
             selections
                 .needed()
@@ -487,6 +511,8 @@ impl Prepare<'_, '_> {
         let _ = cache.pages.compact(budget);
         let _ = cache.geometry.compact(budget);
         let _ = cache.appearance.compact(budget);
+        let _ = cache.trees.compact(budget);
+        let _ = cache.orders.compact(budget);
         let _ = cache.styles.compact(budget);
         let _ = cache.opaque.compact(budget);
         let _ = cache.transparent.compact(budget);
@@ -524,6 +550,7 @@ impl Prepare<'_, '_> {
             device,
             queue,
             pipeline,
+            lod_pipelines,
             pipelines,
             images,
             ..
@@ -532,6 +559,7 @@ impl Prepare<'_, '_> {
         let device = &**device;
         let queue = &**queue;
         let pipeline = &**pipeline;
+        let lod_pipelines = lod_pipelines.as_deref().ok_or(Issue::Deferred)?;
         let pipelines = &**pipelines;
         let lut = images.get(&shared.lut).ok_or(Issue::Deferred)?;
         let budget = shared.backend.budget();
@@ -547,35 +575,26 @@ impl Prepare<'_, '_> {
         };
         // Pages without attribute words bind their positions in the unread attribute slot.
         let attributes_bound = layout.words() > 0;
-        for kind in 0..2 {
-            if kind == 1 && !attributes_bound {
+        let metadata = &node.page.appearance.geometry.metadata;
+        let lod = (Arc::as_ptr(metadata) as usize, Tier::Full);
+        // Positions, attributes, then for full pages the LOD tree and refinement order.
+        for kind in 0..4 {
+            if (kind == 1 && !attributes_bound) || (kind >= 2 && tier != Tier::Full) {
                 continue;
             }
-            let (key, owner) = if kind == 0 {
-                (
-                    geometry,
-                    match tier {
-                        Tier::Full => Owner::Geometry(node.page.appearance.geometry.clone()),
-                        Tier::Coarse => {
-                            Owner::CoarseGeometry(node.page.appearance.geometry.metadata.clone())
-                        }
-                    },
-                )
-            } else {
-                (
-                    appearance,
-                    match tier {
-                        Tier::Full => Owner::Appearance(node.page.appearance.clone()),
-                        Tier::Coarse => {
-                            Owner::CoarseAppearance(node.page.appearance.coarse.clone())
-                        }
-                    },
-                )
+            let (key, owner) = match (kind, tier) {
+                (0, Tier::Full) => (geometry, Owner::Geometry(node.page.appearance.geometry.clone())),
+                (0, Tier::Coarse) => (geometry, Owner::CoarseGeometry(metadata.clone())),
+                (1, Tier::Full) => (appearance, Owner::Appearance(node.page.appearance.clone())),
+                (1, Tier::Coarse) => (appearance, Owner::CoarseAppearance(node.page.appearance.coarse.clone())),
+                (2, _) => (lod, Owner::Tree(metadata.clone())),
+                _ => (lod, Owner::Order(metadata.clone())),
             };
-            let table = if kind == 0 {
-                &mut cache.geometry
-            } else {
-                &mut cache.appearance
+            let table = match kind {
+                0 => &mut cache.geometry,
+                1 => &mut cache.appearance,
+                2 => &mut cache.trees,
+                _ => &mut cache.orders,
             };
             if !table.contains_key(&key) {
                 if *remaining < 4 {
@@ -621,6 +640,7 @@ impl Prepare<'_, '_> {
                 if let Some(probe) = &shared.probe {
                     probe.uploaded(
                         match (kind, tier) {
+                            (2.., _) => super::probe::UploadKind::Indices,
                             (0, Tier::Full) => super::probe::UploadKind::Positions,
                             (_, Tier::Full) => super::probe::UploadKind::Attributes,
                             (0, Tier::Coarse) => super::probe::UploadKind::CoarsePositions,
@@ -745,6 +765,16 @@ impl Prepare<'_, '_> {
             age,
             coverage: Vec4::new(coverage, 0.0, 0.0, 0.0),
             attributes: layout.uniform(),
+            lod: {
+                let glyph = selection::node_glyph(node);
+                Vec4::new(glyph.metres as f32, glyph.pixels as f32, metadata.max_error_m as f32, 0.0)
+            },
+            tree: UVec4::new(
+                if tier == Tier::Full { metadata.tree.values.len() as u32 } else { 0 },
+                0,
+                0,
+                0,
+            ),
         };
         let bytes = owned_uniform(budget, &value).map_err(|_| Issue::CpuBudget)?;
         if !cache.pages.contains_key(&page_key) {
@@ -769,6 +799,21 @@ impl Prepare<'_, '_> {
                     appearance_buffer.buffer.buffer.as_entire_binding(),
                 )),
             );
+            let lod_group = (tier == Tier::Full)
+                .then(|| Some((cache.trees.get(&lod)?, cache.orders.get(&lod)?)))
+                .flatten()
+                .map(|(tree, order)| {
+                    device.create_bind_group(
+                        "cloud lod page",
+                        &pipelines.get_bind_group_layout(&lod_pipelines.page),
+                        &BindGroupEntries::sequential((
+                            buffer.buffer.as_entire_binding(),
+                            tree.buffer.buffer.as_entire_binding(),
+                            order.buffer.buffer.as_entire_binding(),
+                            geometry_buffer.buffer.buffer.as_entire_binding(),
+                        )),
+                    )
+                });
             cache
                 .pages
                 .insert(
@@ -778,6 +823,9 @@ impl Prepare<'_, '_> {
                         buffer,
                         previous: List::default(),
                         group,
+                        order: lod_group.is_some().then_some(lod),
+                        nodes: metadata.tree.values.len() as u32,
+                        lod: lod_group,
                         geometry,
                         appearance: attributes_bound.then_some(appearance),
                         style,
@@ -820,7 +868,9 @@ impl Prepare<'_, '_> {
         remaining: &mut u64,
         staging: &mut List<(GpuCharge, Charge)>,
     ) -> Result<(), Issue> {
+        let _ = (remaining, staging);
         let shared = self.shared.as_deref().ok_or(Issue::Deferred)?;
+        let lod_pipelines = self.lod_pipelines.as_deref().ok_or(Issue::Deferred)?;
         self.selections.upload(
             key,
             item,
@@ -829,9 +879,8 @@ impl Prepare<'_, '_> {
             &self.device,
             &self.queue,
             &self.pipeline,
+            lod_pipelines,
             &self.pipelines,
-            remaining,
-            staging,
         )
     }
 }
@@ -850,7 +899,13 @@ fn observe_allocations(
             demanded_position_bytes: selections.demanded_position_bytes(),
             page_loads: cache.page_loads,
             evicted_pages: cache.evicted_pages,
-            indices: selections.index_bytes(),
+            indices: selections.index_bytes()
+                + cache
+                    .trees
+                    .values()
+                    .chain(cache.orders.values())
+                    .map(|storage| storage.buffer.buffer.size())
+                    .sum::<u64>(),
             selected_points: selections.selected_points(),
             positions: cache
                 .geometry
@@ -1489,10 +1544,8 @@ impl<P: PhaseItem, const OPAQUE: bool> RenderCommand<P> for DrawPage<OPAQUE> {
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let cache = cache.into_inner();
-        let Some(selected) = selections
-            .into_inner()
-            .page(view.retained_view_entity, item.entity())
-        else {
+        let selections = selections.into_inner();
+        let Some(selected) = selections.page(view.retained_view_entity, item.entity()) else {
             return RenderCommandResult::Skip;
         };
         let Some(page) = cache
@@ -1517,9 +1570,22 @@ impl<P: PhaseItem, const OPAQUE: bool> RenderCommand<P> for DrawPage<OPAQUE> {
         if !selected.dataset.lifetime.is_live() {
             return RenderCommandResult::Skip;
         }
-        pass.set_bind_group(2, selected.group.as_ref().unwrap_or(&page.group), &[]);
-        pass.set_bind_group(3, group, &[]);
-        pass.draw(0..6, selected.range.clone());
+        match (selected.slot, selections.heads(view.retained_view_entity)) {
+            (Some(slot), Some(heads)) => {
+                let Some(lod_group) = selected.group.as_ref() else {
+                    return RenderCommandResult::Skip;
+                };
+                pass.set_bind_group(2, lod_group, &[]);
+                pass.set_bind_group(3, group, &[]);
+                pass.draw_indirect(heads, u64::from(slot) * gpu::HEAD_STRIDE);
+            }
+            (Some(_), None) => return RenderCommandResult::Skip,
+            (None, _) => {
+                pass.set_bind_group(2, &page.group, &[]);
+                pass.set_bind_group(3, group, &[]);
+                pass.draw(0..6, selected.range.clone());
+            }
+        }
         receipts.into_inner().drawn(
             view.retained_view_entity,
             item.entity(),

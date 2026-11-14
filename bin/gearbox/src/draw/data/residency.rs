@@ -29,20 +29,20 @@ struct View {
     awarded: u64,
 }
 
+/// GPU bytes kept free beside resident pages: every view's LOD slots for the visible pages,
+/// its view uniform and bins, style uniforms, two upload windows and external reservations.
 pub(super) fn headroom(
-    points: u32,
-    coarse_points: impl Iterator<Item = u64>,
+    views: usize,
+    pages: usize,
     styles: usize,
     upload_window: u64,
     auxiliary: u64,
     other: u64,
 ) -> u64 {
-    coarse_points
-        .fold(0u64, |bytes, coarse| {
-            bytes.saturating_add(
-                (u64::from(points) + coarse.min(u64::from(points))).saturating_mul(4),
-            )
-        })
+    use super::super::gpu::{HEAD_STRIDE, TABLE_BYTES};
+    let slots = (pages.max(1).next_power_of_two() as u64).saturating_mul(HEAD_STRIDE + TABLE_BYTES);
+    (views as u64)
+        .saturating_mul(slots.saturating_add(4096))
         .saturating_add((styles as u64).saturating_mul(16 * 1024))
         .saturating_add(upload_window.saturating_mul(2))
         .saturating_add(auxiliary)

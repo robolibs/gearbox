@@ -1,28 +1,31 @@
 import bevy_pbr::render::mesh_view_bindings::view;
-import gearbox::draw::draw_cloud_types::{CloudPosition, CloudSample, CloudAge, cloud_project_point, cloud_radius_px, cloud_projected_edge, cloud_clip_accept, CLOUD_ALL_VALID};
+import gearbox::draw::draw_cloud_types::{CloudPosition, CloudSample, CloudPageUniform, cloud_project_point, cloud_radius_px, cloud_projected_edge, cloud_clip_accept, CLOUD_ALL_VALID};
 import gearbox::draw::draw_cloud_color::{style, cloud_sample_color};
 import gearbox::draw::draw_common::{srgb_to_linear, display_to_scene};
 import gearbox::draw::draw_frost::background_frost;
 
-struct CloudPageUniform {
-    world_from_local: mat4x4<f32>,
-    clip_rotation: mat4x4<f32>,
-    clip_min: vec4<f32>,
-    clip_max: vec4<f32>,
-    age: CloudAge,
-    // x: the radius in metres a point is drawn at least; 0 at full detail.
-    coverage: vec4<f32>,
-    // x: attribute words per point, y: their colour kind, z: 1 when a radius word ends
-    // each point, w: the first validity word or CLOUD_ALL_VALID.
-    attributes: vec4<u32>,
-};
 @group(2) @binding(0) var<uniform> page: CloudPageUniform;
 @group(2) @binding(1) var<storage, read> positions: array<CloudPosition>;
 @group(2) @binding(2) var<storage, read> attributes: array<u32>;
-@if((CLOUD_SELECTED))
-@group(2) @binding(3) var<storage, read> selected_indices: array<u32>;
+@if((CLOUD_LOD))
+@group(2) @binding(3) var<storage, read> order: array<u32>;
+// Per node of the page: (first instance, refinement-order position) the view's LOD pass chose.
+@if((CLOUD_LOD))
+@group(2) @binding(4) var<storage, read> table: array<vec2<u32>>;
 @group(3) @binding(1) var lut_texture: texture_3d<f32>;
 @group(3) @binding(2) var lut_sampler: sampler;
+
+// The point an instance draws: the last node starting at or before it, offset into its range.
+@if((CLOUD_LOD))
+fn lod_ordinal(instance: u32) -> u32 {
+    var low = 0u;
+    var high = max(page.tree.x, 1u);
+    while low + 1u < high {
+        let middle = (low + high) / 2u;
+        if table[middle].x <= instance { low = middle; } else { high = middle; }
+    }
+    return order[table[low].y + instance - table[low].x];
+}
 
 struct CloudOutput {
     @builtin(position) position: vec4<f32>,
@@ -34,9 +37,9 @@ struct CloudOutput {
 
 @vertex
 fn vertex(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) instance_index: u32) -> CloudOutput {
-    @if((CLOUD_SELECTED))
-    let ordinal = selected_indices[instance_index];
-    @if((!(CLOUD_SELECTED)))
+    @if((CLOUD_LOD))
+    let ordinal = lod_ordinal(instance_index);
+    @if((!(CLOUD_LOD)))
     let ordinal = instance_index;
     let stored = positions[ordinal];
     let local = vec3(stored.x, stored.y, stored.z);

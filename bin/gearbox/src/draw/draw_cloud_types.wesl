@@ -1,5 +1,28 @@
 struct CloudPosition { x: f32, y: f32, z: f32 };
 
+struct CloudAge {
+    anchor: vec4<u32>,
+    mapping: vec4<f32>,
+    palette: vec4<u32>,
+};
+
+struct CloudPageUniform {
+    world_from_local: mat4x4<f32>,
+    clip_rotation: mat4x4<f32>,
+    clip_min: vec4<f32>,
+    clip_max: vec4<f32>,
+    age: CloudAge,
+    // x: the radius in metres a point is drawn at least; 0 at full detail.
+    coverage: vec4<f32>,
+    // x: attribute words per point, y: their colour kind, z: 1 when a radius word ends
+    // each point, w: the first validity word or CLOUD_ALL_VALID.
+    attributes: vec4<u32>,
+    // x: glyph radius in metres, y: glyph radius in pixels, z: local position error in metres.
+    lod: vec4<f32>,
+    // x: hierarchy nodes the level-of-detail pass lists.
+    tree: vec4<u32>,
+};
+
 // One point's colour words, their colour kind and whether they are valid.
 struct CloudSample { kind: u32, valid: u32, words: vec2<u32> };
 
@@ -17,12 +40,6 @@ fn cloud_value_indices(word: u32) -> u32 {
     let map = select(raw, 255u, (word >> 31u) != 0u);
     return map | (raw << 8u) | (((word >> 28u) & 7u) << 16u);
 }
-
-struct CloudAge {
-    anchor: vec4<u32>,
-    mapping: vec4<f32>,
-    palette: vec4<u32>,
-};
 
 fn cloud_sub64(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
     return vec2(a.x - b.x, a.y - b.y - select(0u, 1u, a.x < b.x));

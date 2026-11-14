@@ -576,10 +576,7 @@ fn nearest(
             continue;
         }
         let mut closest: Option<(f32, u32, Vec3)> = None;
-        for instance in drawn.range.clone() {
-            let Some(record) = drawn.values.map_or(Some(instance), |v| v.get(instance as usize).copied()) else {
-                continue;
-            };
+        for record in drawn.range.clone() {
             let record = record as usize;
             let (ordinal, xyz, attributes) = match drawn.tier {
                 Tier::Full => (

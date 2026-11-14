@@ -103,6 +103,10 @@ pub(super) struct PageUniform {
     pub coverage: Vec4,
     /// Where the page's attribute words sit: see `appearance::Layout::uniform`.
     pub attributes: UVec4,
+    /// x: glyph radius in metres, y: glyph radius in pixels, z: local position error in metres.
+    pub lod: Vec4,
+    /// x: hierarchy nodes the GPU level-of-detail pass lists, 0 for coarse pages.
+    pub tree: UVec4,
 }
 
 #[cfg(test)]

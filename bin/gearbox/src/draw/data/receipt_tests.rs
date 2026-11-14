@@ -224,7 +224,9 @@ fn frame(backend: &DrawingBackend, empty: bool, views: usize, pages: usize) -> F
                 dataset: dataset.clone(),
                 view,
                 expected: pages,
-                selected_items: dataset.pages.iter().map(|page| page.clip.selected).sum(),
+                selected_items: AtomicU64::new(dataset.pages.iter().map(|page| page.clip.selected).sum()),
+                slots: Vec::new(),
+                resolved: AtomicBool::new(true),
                 drawn: AtomicUsize::new(0),
             })
             .collect(),
@@ -241,6 +243,7 @@ fn frame(backend: &DrawingBackend, empty: bool, views: usize, pages: usize) -> F
             .collect(),
         octrees: Vec::new(),
         octree_pages: Vec::new(),
+        readbacks: Mutex::new(Vec::new()),
         _charge: charge(
             backend.budget(),
             size_of::<Frame>()
@@ -322,7 +325,7 @@ fn wholly_clipped_frontier_requires_draw_and_view_proof_and_is_not_empty() {
     let mut frame = frame(&backend, false, 1, 1);
     let data = Arc::get_mut(&mut frame.entries[0].dataset).unwrap();
     Arc::get_mut(&mut data.pages[0]).unwrap().clip.selected = 0;
-    frame.entries[0].selected_items = 0;
+    frame.entries[0].selected_items = AtomicU64::new(0);
     assert!(frame.completion(0).is_none());
     frame.views[0].finished.store(true, Ordering::Release);
     assert!(frame.completion(0).is_none());

@@ -36,6 +36,16 @@ Everything that was neither visualization nor the simulator:
 
 Sections below that describe these are history.
 
+## GPU level of detail — 2026-11-14
+
+Cloud LOD and culling moved from a CPU cut with per-view index uploads to a per-view compute
+pass (`draw_cloud_lod.wesl`). Measure, choose, emit and accept run before the main pass, and
+pages draw with `draw_indirect`. Static per-page trees (`tree.rs`) and refinement orders
+upload once. Receipts map a copy of each view's heads after the frame and stay exact. The
+CPU `lod::select` cut, its pending jobs, index buffers and tests are removed. The GPU test
+checks that cuts have no holes or overlaps, stay within the budget, draw full detail when it
+fits, and cull pages out of view.
+
 ## Compact point records — 2026-11-14
 
 Cloud points drop from 48 to 12 bytes of position plus the attribute words their color

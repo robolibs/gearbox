@@ -7,6 +7,8 @@ mod color;
 mod raster;
 #[path = "projection_gpu_tests.rs"]
 mod projection;
+#[path = "lod_gpu_tests.rs"]
+mod lod;
 
 fn definitions() -> &'static str {
     include_str!("../draw_cloud_types.wesl")

@@ -49,6 +49,7 @@ pub(super) struct SpatialMetadata {
     pub bounds_m: Option<[[f64; 3]; 2]>,
     pub max_error_m: f64,
     pub hierarchy: super::hierarchy::Hierarchy,
+    pub tree: Records<super::tree::TreeNode>,
     pub coarse: super::coarse::Representatives,
     _charge: Charge,
 }
@@ -111,12 +112,16 @@ impl Geometry {
             bounds_m: placement.bounds_m,
             max_error_m: placement.max_error_m,
             hierarchy: super::hierarchy::Hierarchy::empty(budget)?,
+            tree: Records::new(budget, 0)?,
             coarse: super::coarse::Representatives::empty(budget)?,
             _charge: metadata_charge,
         });
         let mut geometry = Self::assemble(budget, source, placement, metadata)?;
         let hierarchy = super::hierarchy::Hierarchy::build(budget, &geometry, check)?;
-        Arc::get_mut(&mut geometry.metadata).unwrap().hierarchy = hierarchy;
+        let tree = super::tree::build(budget, &hierarchy, geometry.rebase_m, geometry.max_error_m)?;
+        let metadata = Arc::get_mut(&mut geometry.metadata).unwrap();
+        metadata.hierarchy = hierarchy;
+        metadata.tree = tree;
         let coarse = super::coarse::Representatives::build(budget, &geometry, check)?;
         Arc::get_mut(&mut geometry.metadata).unwrap().coarse = coarse;
         check()?;

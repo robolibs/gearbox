@@ -27,6 +27,7 @@ mod render;
 mod retirement;
 pub(super) mod runtime;
 mod style;
+mod tree;
 mod upload;
 mod upload_window;
 mod worker;

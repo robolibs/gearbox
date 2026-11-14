@@ -1,37 +1,24 @@
 use super::*;
 
 #[test]
-fn normal_survey_fits_with_its_real_coarse_index_and_shared_style_bounds() {
+fn normal_survey_fits_with_its_lod_tree_order_and_shared_style_bounds() {
     let coarse_points = 19_584;
     let pages = 77;
-    let point_bytes = 16;
-    let source_bytes = 5_000_000 * point_bytes + coarse_points * point_bytes + pages * 1024;
-    let reserve = headroom(
-        1_000_000,
-        [coarse_points].into_iter(),
-        1,
-        4 << 20,
-        14_720_000,
-        0,
-    );
-    assert_eq!(reserve, 27_203_328);
-    assert_eq!(source_bytes + reserve, 107_595_520);
+    // Position, colour word and refinement order per point; a tree and placement per page.
+    let source_bytes = 5_000_000 * 20 + coarse_points * 16 + pages * (511 * 80 + 1024);
+    let reserve = headroom(1, pages as usize, 1, 4 << 20, 14_720_000, 0);
+    assert_eq!(reserve, 128 * (256 + 4096) + 4096 + 16_384 + 2 * (4 << 20) + 14_720_000);
     assert!(source_bytes + reserve <= 256 << 20);
-    let old_reserve = 8_000_000 + 8 * 1024 * 1024 + 14_720_000 + pages * 16_384;
-    assert!(reserve < old_reserve);
 }
 
 #[test]
-fn index_headroom_caps_each_fallback_but_keeps_upload_and_external_reservations() {
+fn lod_headroom_holds_a_slot_per_visible_page_per_view_and_external_reservations() {
     assert_eq!(
-        headroom(100, [0, 50, 500].into_iter(), 2, 1024, 300, 400),
-        (100 + 100 + 50 + 100 + 100) * 4 + 2 * 16_384 + 2048 + 700
+        headroom(2, 3, 2, 1024, 300, 400),
+        2 * (4 * (256 + 4096) + 4096) + 2 * 16_384 + 2048 + 700
     );
-    assert_eq!(headroom(100, [].into_iter(), 0, 1024, 300, 400), 2748);
-    assert_eq!(
-        headroom(u32::MAX, [u64::MAX].into_iter(), usize::MAX, u64::MAX, 1, 1),
-        u64::MAX
-    );
+    assert_eq!(headroom(0, 0, 0, 1024, 300, 400), 2748);
+    assert_eq!(headroom(usize::MAX, usize::MAX >> 1, usize::MAX, u64::MAX, 1, 1), u64::MAX);
 }
 
 fn solve(costs: &[u64], wants: &[(usize, usize, f64)], ceiling: u64) -> (Vec<usize>, u64) {

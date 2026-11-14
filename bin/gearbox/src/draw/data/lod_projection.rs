@@ -52,35 +52,9 @@ impl Projection {
         }
     }
 
-    pub fn union(self, other: Self) -> Self {
-        if !self.visible {
-            return other;
-        }
-        if !other.visible {
-            return self;
-        }
-        Self {
-            visible: true,
-            rect: [
-                self.rect[0].min(other.rect[0]),
-                self.rect[1].min(other.rect[1]),
-                self.rect[2].max(other.rect[2]),
-                self.rect[3].max(other.rect[3]),
-            ],
-        }
-    }
 }
 
 impl View {
-    pub fn valid(self) -> bool {
-        self.clip_from_world.is_finite()
-            && self.viewport.into_iter().all(|v| v > 0)
-            && self.error_px.is_finite()
-            && self.error_px > 0.0
-            && self.hysteresis.is_finite()
-            && (0.0..1.0).contains(&self.hysteresis)
-    }
-
     pub(super) fn sampling_error(
         self,
         world_from_local: DMat4,

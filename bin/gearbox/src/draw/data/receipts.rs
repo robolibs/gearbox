@@ -1,6 +1,6 @@
 use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
 
 use bevy::camera::{ManualTextureViewHandle, RenderTarget, visibility::RenderLayers};
@@ -179,8 +179,21 @@ struct Entry {
     dataset: Arc<Dataset>,
     view: usize,
     expected: usize,
-    selected_items: u64,
+    /// Coarse records known when queued, plus what the view's LOD pass selected in `slots`.
+    selected_items: AtomicU64,
+    slots: Vec<u32>,
+    /// Whether `selected_items` includes the GPU-selected slots.
+    resolved: AtomicBool,
     drawn: AtomicUsize,
+}
+
+/// One view's LOD heads, copied after its pass, and the pool the buffer returns to.
+pub(super) struct LodReadback {
+    pub view: RetainedViewEntity,
+    pub buffer: super::render::OwnedBuffer,
+    pub pool: Arc<Mutex<Vec<super::render::OwnedBuffer>>>,
+    /// The view's heads as last read back, per slot.
+    pub last: Arc<Mutex<Vec<super::render::gpu::HeadCounts>>>,
 }
 
 struct PageMark {
@@ -212,6 +225,7 @@ struct Frame {
     pages: Vec<PageMark>,
     octrees: Vec<OctreeEntry>,
     octree_pages: Vec<OctreeMark>,
+    readbacks: Mutex<Vec<LodReadback>>,
     _charge: Charge,
     _permit: Permit,
 }
@@ -250,12 +264,13 @@ impl Frame {
         let view = &self.views[entry.view];
         if !view.finished.load(Ordering::Acquire)
             || entry.drawn.load(Ordering::Acquire) != entry.expected
+            || !entry.resolved.load(Ordering::Acquire)
         {
             return None;
         }
         let dataset = &entry.dataset;
         let counts = dataset.generation.counts();
-        let selected_items = entry.selected_items;
+        let selected_items = entry.selected_items.load(Ordering::Acquire);
         Some(RenderCompletion {
             target: VisibilityTarget {
                 dataset: dataset.revision,
@@ -330,6 +345,78 @@ impl Frame {
         })
     }
 
+    /// Whether any entry waits on counts its view's LOD pass selected on the GPU.
+    fn awaits_lod(&self) -> bool {
+        self.entries.iter().any(|entry| !entry.resolved.load(Ordering::Acquire))
+    }
+
+    /// Returns the frame's readback buffers to their pools unread.
+    fn release_readbacks(&self) {
+        for readback in self.readbacks.lock().unwrap().drain(..) {
+            readback.pool.lock().unwrap().push(readback.buffer);
+        }
+    }
+
+    /// Maps every view's copied LOD heads, adds each entry's selected slots, then runs `done`.
+    fn resolve(self: Arc<Self>, done: impl FnOnce(&Frame) + Send + 'static) {
+        let readbacks = std::mem::take(&mut *self.readbacks.lock().unwrap());
+        if readbacks.is_empty() {
+            done(&self);
+            return;
+        }
+        let buffers: Vec<_> = readbacks.iter().map(|readback| readback.buffer.buffer.clone()).collect();
+        let mapped = Arc::new(Mutex::new(vec![false; readbacks.len()]));
+        let remaining = Arc::new(AtomicUsize::new(readbacks.len()));
+        let finish = Arc::new(Mutex::new(Some((readbacks, done))));
+        for (index, buffer) in buffers.into_iter().enumerate() {
+            let (frame, mapped, remaining, finish) =
+                (self.clone(), mapped.clone(), remaining.clone(), finish.clone());
+            buffer.slice(..).map_async(bevy::render::render_resource::MapMode::Read, move |result| {
+                mapped.lock().unwrap()[index] = result.is_ok();
+                if remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
+                    return;
+                }
+                let Some((readbacks, done)) = finish.lock().unwrap().take() else { return };
+                let mapped = mapped.lock().unwrap();
+                for (readback, ok) in readbacks.into_iter().zip(mapped.iter()) {
+                    if *ok {
+                        frame.apply(&readback);
+                        readback.buffer.buffer.unmap();
+                    }
+                    readback.pool.lock().unwrap().push(readback.buffer);
+                }
+                done(&frame);
+            });
+        }
+    }
+
+    fn apply(&self, readback: &LodReadback) {
+        use super::render::gpu::{HEAD_STRIDE, HeadCounts};
+        let Some(view) = self.views.iter().position(|mark| mark.view.retained == readback.view) else {
+            return;
+        };
+        let Ok(range) = readback.buffer.buffer.slice(..).get_mapped_range() else {
+            return;
+        };
+        *readback.last.lock().unwrap() = range
+            .chunks_exact(HEAD_STRIDE as usize)
+            .map(|head| bytemuck::pod_read_unaligned::<HeadCounts>(&head[..size_of::<HeadCounts>()]))
+            .collect();
+        for entry in self.entries.iter().filter(|entry| entry.view == view && !entry.slots.is_empty()) {
+            let accepted: u64 = entry
+                .slots
+                .iter()
+                .filter_map(|slot| {
+                    let at = (u64::from(*slot) * HEAD_STRIDE) as usize;
+                    range.get(at..at + size_of::<HeadCounts>())
+                })
+                .map(|bytes| u64::from(bytemuck::pod_read_unaligned::<HeadCounts>(bytes).accepted))
+                .sum();
+            entry.selected_items.fetch_add(accepted, Ordering::AcqRel);
+            entry.resolved.store(true, Ordering::Release);
+        }
+    }
+
     /// Whether any cloud or compact-instance dataset finished this frame.
     fn completes(&self) -> bool {
         (0..self.entries.len()).any(|index| self.completion(index).is_some())
@@ -370,6 +457,14 @@ pub(super) struct Receipts {
 impl Receipts {
     pub fn views(&self) -> &[RegisteredView] {
         &self.views
+    }
+
+    /// Hands this frame a view's copied LOD heads; without a frame the buffer goes back.
+    pub(super) fn lod_readback(&self, readback: LodReadback) {
+        match &self.current {
+            Some(frame) => frame.readbacks.lock().unwrap().push(readback),
+            None => readback.pool.lock().unwrap().push(readback.buffer),
+        }
     }
 
     pub fn drawn(&self, view: RetainedViewEntity, entity: Entity, pass: u8) {
@@ -569,7 +664,7 @@ fn prepare(
             + 16
             + count * size_of::<ViewMark>()
             + entry_count * size_of::<Entry>()
-            + page_count * size_of::<PageMark>()
+            + page_count * (size_of::<PageMark>() + size_of::<u32>())
             + octree_count * size_of::<OctreeEntry>()
             + octree_page_count * size_of::<OctreeMark>(),
     )?;
@@ -580,6 +675,7 @@ fn prepare(
         pages: Vec::new(),
         octrees: Vec::new(),
         octree_pages: Vec::new(),
+        readbacks: Mutex::new(Vec::new()),
         _charge: metadata,
         _permit: permit,
     };
@@ -653,7 +749,7 @@ fn prepare(
             .iter()
             .filter(|data| offered.live(data))
         {
-            let (expected, selected_items) = if let Some(selections) = selections {
+            let (expected, selected_items, slots) = if let Some(selections) = selections {
                 let Some(counts) = selections.counts(view.retained, view.identity, dataset) else {
                     continue;
                 };
@@ -662,13 +758,16 @@ fn prepare(
                 (
                     dataset.render_pages(),
                     dataset.pages.iter().map(|page| page.clip.selected).sum(),
+                    Vec::new(),
                 )
             };
             frame.entries.push(Entry {
                 dataset: dataset.clone(),
                 view: index,
                 expected,
-                selected_items,
+                selected_items: AtomicU64::new(selected_items),
+                resolved: AtomicBool::new(slots.is_empty()),
+                slots,
                 drawn: AtomicUsize::new(0),
             });
         }
@@ -771,24 +870,31 @@ fn finish_view(view: ViewQuery<&ExtractedView>, receipts: Res<Receipts>) {
 }
 
 fn submit(mut receipts: ResMut<Receipts>, shared: Option<Res<Shared>>, queue: Res<RenderQueue>) {
-    let (Some(frame), Some(shared)) = (receipts.current.take(), shared) else {
+    let Some(frame) = receipts.current.take() else {
         return;
     };
-    if !frame.completes() {
+    let Some(shared) = shared else {
+        frame.release_readbacks();
+        return;
+    };
+    if !frame.completes() && !frame.awaits_lod() {
+        frame.release_readbacks();
         return;
     }
     let backend = shared.backend.clone();
     #[cfg(feature = "draw-probes")]
     let probe = shared.probe.clone();
     queue.on_submitted_work_done(move || {
-        #[cfg(feature = "draw-probes")]
-        if let Some(probe) = probe {
-            for (index, entry) in frame.entries.iter().enumerate() {
-                if let Some(completion) = frame.completion(index) {
-                    probe.completed(entry.dataset.key(), completion);
+        frame.resolve(move |frame| {
+            #[cfg(feature = "draw-probes")]
+            if let Some(probe) = probe {
+                for (index, entry) in frame.entries.iter().enumerate() {
+                    if let Some(completion) = frame.completion(index) {
+                        probe.completed(entry.dataset.key(), completion);
+                    }
                 }
             }
-        }
-        frame.publish(&backend);
+            frame.publish(&backend);
+        });
     });
 }

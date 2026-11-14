@@ -162,13 +162,13 @@ fn check(report: &Report, limits: &DataLimits, count: u32) -> Result<()> {
         "resident source count exceeds retained source",
     )?;
     require(
-        number(allocated, "positions") == resident * 16
+        number(allocated, "positions") == resident * 12
             && number(allocated, "positions") == number(allocated, "demanded_position_bytes"),
         "resident positions differ from exact selected-page demand",
     )?;
     require(
-        number(allocated, "attributes") == resident * 32,
-        "resident attributes differ from exact source-page count",
+        number(allocated, "attributes") == 0,
+        "constant-colour pages hold no attribute words",
     )?;
     require(
         number(allocated, "gpu_bytes") <= limits.gpu_bytes,

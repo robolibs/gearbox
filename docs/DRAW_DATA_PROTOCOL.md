@@ -701,8 +701,24 @@ For compact clouds, a receipt requires every selected page's actual draw command
 the target view's finished render pass and completion of the submitted GPU work.
 Empty clouds require the completed view pass too. Source and selected counts describe
 the frontier, not a guarantee that every sample passed clipping, depth or occlusion.
-The compact renderer reports drawn, empty and wholly box-clipped frontiers. LOD and
-view-frustum culling receipts are not implemented yet.
+The compact renderer reports drawn, empty and wholly box-clipped frontiers.
+
+Level of detail runs on the GPU. Each full page uploads its hierarchy nodes (80 bytes each)
+and refinement order (4 bytes per point) once. Every frame, each view runs a compute pass
+before its main pass:
+
+1. Every visible node adds the points it would draw at each error threshold to a
+   histogram.
+2. One invocation picks the finest threshold, no coarser than 1.5 px, that keeps the view
+   within its visible-point budget.
+3. Each page lists the refinement-order range every node draws at that threshold, and
+   draws it indirectly.
+4. Clip-accepted points are counted on the GPU.
+
+The selection is a cut through each page's hierarchy: no point is drawn twice, and no part
+of a visible page is left out. Coarse pages draw every coarse record. A frame's receipt
+reads back the GPU counts after the submitted work completes, so `selected_items` stays
+exact. Picking considers every record of a drawn page.
 
 The native roster excludes sensor cameras, supports window-backed interactive views
 and Gearbox's embedded ChaseCamera viewport, and preserves identity during temporary
