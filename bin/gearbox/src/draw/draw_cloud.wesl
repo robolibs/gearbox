@@ -1,7 +1,7 @@
-import bevy_pbr::render::mesh_view_bindings::{view, globals};
+import bevy_pbr::render::mesh_view_bindings::view;
 import gearbox::draw::draw_cloud_types::{CloudPosition, CloudSample, CloudAge, cloud_project_point, cloud_radius_px, cloud_projected_edge, cloud_clip_accept, CLOUD_ALL_VALID};
 import gearbox::draw::draw_cloud_color::{style, cloud_sample_color};
-import gearbox::draw::draw_common::{srgb_to_linear, display_to_scene, hud_sweep, hud_ladder, hud_iso_distance};
+import gearbox::draw::draw_common::{srgb_to_linear, display_to_scene};
 import gearbox::draw::draw_frost::background_frost;
 
 struct CloudPageUniform {
@@ -30,20 +30,7 @@ struct CloudOutput {
     @location(1) @interpolate(flat) radius_px: f32,
     @location(2) @interpolate(flat) rgba: vec4<f32>,
     @location(3) @interpolate(flat) linear_edge: u32,
-    // x: the sensor ping's ring over this point, y: its wake, z: on a contour height; zero without glow.
-    @location(4) @interpolate(flat) ping: vec3<f32>,
 };
-
-// Emission per unit of glow, as a multiple of the point's colour.
-const POINT_EMISSION: f32 = 2.0;
-// Sensor ping: rings racing outward from the viewer across glowing clouds.
-const PING_PERIOD_M: f32 = 60.0;
-const PING_SPEED_MPS: f32 = 20.0;
-const PING_WAKE_M: f32 = 6.0;
-const PING_FRONT_M: f32 = 0.35;
-// Topographic hologram: points on contour heights light up, spaced for the view distance.
-const CONTOUR_BASE_M: f32 = 0.25;
-const CONTOUR_MIN_PX: f32 = 6.0;
 
 @vertex
 fn vertex(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) instance_index: u32) -> CloudOutput {
@@ -86,13 +73,6 @@ fn vertex(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) ins
     out.rgba = cloud_sample_color(sample, page.age);
     if !(style.controls.x == 1u && style.controls.y == 1u) { out.rgba = vec4(srgb_to_linear(out.rgba.rgb), out.rgba.a); }
     out.rgba = vec4(display_to_scene(out.rgba.rgb, lut_texture, lut_sampler), out.rgba.a);
-    let metres_per_px = 2.0 * abs(center.w) / max(abs(projection_y) * view.viewport.w, 1e-6);
-    let reach = length(world.xz - view.world_position.xz);
-    let ring = hud_sweep(reach, globals.time, PING_PERIOD_M, PING_SPEED_MPS, PING_WAKE_M, max(metres_per_px, PING_FRONT_M));
-    let spacing = hud_ladder(CONTOUR_BASE_M, metres_per_px, CONTOUR_MIN_PX);
-    let band = max(1.2 * metres_per_px, 0.03);
-    let contour = 1.0 - smoothstep(0.5 * band, band, hud_iso_distance(world.y + 0.5 * spacing, spacing));
-    out.ping = vec3(ring, contour) * min(max(style.effects.y, 0.0) * 4.0, 1.0);
     if center.w <= 0.0 || center.z < 0.0 || center.z > center.w ||
         !cloud_clip_accept(page.clip_rotation, page.clip_min, page.clip_max, local) {
         out.position = vec4(2.0, 2.0, 2.0, 1.0);
@@ -109,10 +89,8 @@ fn fragment(in: CloudOutput) -> @location(0) vec4<f32> {
     let alpha = opacity * coverage;
     if alpha <= 0.0 { discard; }
     var rgb = in.rgba.rgb;
-    // Glow turns the point into a light source: the whole point emits, its rim a little more.
     let rim = 1.0 - clamp(edge / 1.5, 0.0, 1.0);
-    rgb = min(rgb * (1.0 + min(style.effects.y * (POINT_EMISSION + 0.12 * rim), 65504.0)), vec3(65504.0));
-    rgb = min(rgb * (1.0 + 3.0 * in.ping.x + 0.8 * in.ping.y + 2.2 * in.ping.z), vec3(65504.0));
+    rgb = min(rgb * (1.0 + min(style.effects.y * 0.12 * rim, 65504.0)), vec3(65504.0));
     @if((CLOUD_OPAQUE))
     if opacity < 1.0 { discard; }
     @if((CLOUD_OPAQUE) && (CLOUD_SINGLE_SAMPLE))
