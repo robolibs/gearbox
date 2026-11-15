@@ -411,6 +411,8 @@ make.recipe{ name = "test-draw-cloud-gpu", desc = "verify production cloud color
              run = function() gpu("cargo", "test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::gpu_tests::", "--", "--ignored", "--test-threads=1", "--nocapture") end }
 make.recipe{ name = "test-draw-cloud-projection", desc = "verify production radius units, projection, finite extremes and coverage on GPU",
              run = function() gpu("cargo", "test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::gpu_tests::projection::", "--", "--ignored", "--test-threads=1", "--nocapture") end }
+make.recipe{ name = "test-draw-cloud-dome", desc = "verify production Eye-Dome Lighting shading and its depth redraw on GPU",
+             run = function() gpu("cargo", "test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::gpu_tests::eye_dome::", "--", "--ignored", "--test-threads=1", "--nocapture") end }
 make.recipe{ name = "capture-draw-frost-window", desc = "capture the three glass finishes across native Hyprland window resizes",
              deps = { "build" },
              params = { { "--args", desc = "[OUTPUT_DIR]; requires a running Hyprland compositor" } },

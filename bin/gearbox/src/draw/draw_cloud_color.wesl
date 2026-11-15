@@ -7,6 +7,7 @@ struct CloudStyle {
     effects: vec4<f32>,
     ramp: array<vec4<f32>, 256>,
     categories: array<vec4<u32>, 64>,
+    shading: vec4<f32>,
 };
 @group(3) @binding(0) var<uniform> style: CloudStyle;
 

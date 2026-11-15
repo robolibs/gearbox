@@ -74,7 +74,9 @@ fn vertex(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) ins
     out.radius_px = projected.radius_px;
     out.linear_edge = projected.linear_edge;
     out.rgba = cloud_sample_color(sample, page.age);
+    @if((!(CLOUD_DOME)))
     if !(style.controls.x == 1u && style.controls.y == 1u) { out.rgba = vec4(srgb_to_linear(out.rgba.rgb), out.rgba.a); }
+    @if((!(CLOUD_DOME)))
     out.rgba = vec4(display_to_scene(out.rgba.rgb, lut_texture, lut_sampler), out.rgba.a);
     if center.w <= 0.0 || center.z < 0.0 || center.z > center.w ||
         !cloud_clip_accept(page.clip_rotation, page.clip_min, page.clip_max, local) {
@@ -111,4 +113,16 @@ fn fragment(in: CloudOutput) -> @location(0) vec4<f32> {
     }
     @if((!(CLOUD_OPAQUE)))
     return background_frost(vec4(rgb * alpha, alpha), in.position.xy, style.effects.z);
+}
+
+// Depth and Eye-Dome strength of the opaque splat the main pass draws over the pixel centre.
+@fragment
+fn dome(in: CloudOutput) -> @location(0) vec4<f32> {
+    let coverage = clamp(cloud_projected_edge(in.offset_px, in.radius_px, in.linear_edge) + 0.5, 0.0, 1.0);
+    @if((CLOUD_SINGLE_SAMPLE))
+    let least = 1.0;
+    @if((!(CLOUD_SINGLE_SAMPLE)))
+    let least = 0.5;
+    if in.rgba.a * style.effects.x < 1.0 || coverage < least { discard; }
+    return vec4(in.position.z, style.shading.x, 0.0, 0.0);
 }

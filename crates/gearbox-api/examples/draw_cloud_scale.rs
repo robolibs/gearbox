@@ -220,7 +220,10 @@ fn main() -> Result<()> {
             let result = client.draw_clear(namespace)?;
             require(result.is_ok(), &result.message())?;
         }
-        let fixture = fixture::make_sized(DataKey::new(NS, "survey")?, points)?;
+        let mut fixture = fixture::make_sized(DataKey::new(NS, "survey")?, points)?;
+        if let Ok(strength) = std::env::var("GEARBOX_CLOUD_EYE_DOME") {
+            fixture.descriptor.presentation.eye_dome = strength.parse()?;
+        }
         let revision = if let Ok(root) = std::env::var("GEARBOX_CLOUD_SCALE_PROBE") {
             proof::run(
                 &mut data,

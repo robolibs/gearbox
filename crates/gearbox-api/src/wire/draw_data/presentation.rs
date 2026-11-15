@@ -388,6 +388,13 @@ pub struct Presentation {
     /// Slices sampled through a volume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<super::VolumeView>,
+    /// Eye-Dome Lighting strength for opaque cloud points, 0..8; 0 draws them unshaded.
+    #[serde(default, skip_serializing_if = "unshaded")]
+    pub eye_dome: f32,
+}
+
+fn unshaded(strength: &f32) -> bool {
+    *strength == 0.0
 }
 
 /// One arrow per `every` records that carry a normal; records without one get none.
@@ -423,6 +430,7 @@ impl Default for Presentation {
             octree: None,
             normals: None,
             volume: None,
+            eye_dome: 0.0,
         }
     }
 }
@@ -450,6 +458,9 @@ impl Presentation {
         }
         if !self.glow.is_finite() || self.glow < 0.0 {
             return Err("glow must be finite and nonnegative".into());
+        }
+        if !self.eye_dome.is_finite() || !(0.0..=8.0).contains(&self.eye_dome) {
+            return Err("eye_dome must be finite in 0..8".into());
         }
         let radius = match self.size {
             PointSize::Metres { radius } | PointSize::Pixels { radius } => radius,

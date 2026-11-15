@@ -7,14 +7,14 @@ use wgpu::util::DeviceExt;
 
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
-struct Point {
-    center: [f32; 4],
+pub(super) struct Point {
+    pub center: [f32; 4],
     rgba: [f32; 4],
     projection: [f32; 4],
     clip_mode: [u32; 4],
 }
 
-fn point(depth: f32, rgba: [f32; 4]) -> Point {
+pub(super) fn point(depth: f32, rgba: [f32; 4]) -> Point {
     Point {
         center: [32.0, 32.0, depth, 12.4],
         rgba,
@@ -67,7 +67,7 @@ fn preprocess(source: &str, opaque: bool, samples: u32) -> String {
     output
 }
 
-fn shader(opaque: bool, samples: u32) -> String {
+pub(super) fn shader(opaque: bool, samples: u32) -> String {
     let production = include_str!("../draw_cloud.wesl");
     let output = production
         .split_once("struct CloudOutput")
@@ -111,7 +111,7 @@ fn vertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index) index: u3
     )
 }
 
-fn render(
+pub(super) fn render(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     points: &[Point],

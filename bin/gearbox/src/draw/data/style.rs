@@ -10,6 +10,8 @@ pub(super) struct Style {
     pub effects: Vec4,
     pub ramp: [Vec4; 256],
     pub categories: [UVec4; 64],
+    /// x: Eye-Dome Lighting strength of the opaque points.
+    pub shading: Vec4,
 }
 
 fn color(bytes: [u8; 4]) -> Vec4 {
@@ -33,6 +35,7 @@ impl Style {
             ),
             ramp: [Vec4::ONE; 256],
             categories: [UVec4::ZERO; 64],
+            shading: Vec4::new(presentation.eye_dome, 0.0, 0.0, 0.0),
         };
         let mut map = None;
         match &presentation.color {

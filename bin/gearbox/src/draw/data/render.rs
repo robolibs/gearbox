@@ -44,6 +44,8 @@ use super::{
 pub(in crate::draw::data) mod selection;
 #[path = "lod_gpu.rs"]
 pub(in crate::draw::data) mod gpu;
+#[path = "eye_dome.rs"]
+pub(in crate::draw::data) mod dome;
 
 pub(super) struct OwnedBuffer {
     pub buffer: Buffer,
@@ -282,6 +284,7 @@ pub(super) fn install(app: &mut App) {
                 .in_set(RenderSystems::QueueMeshes),),
         );
     gpu::install(app);
+    dome::install(app);
     #[cfg(feature = "draw-probes")]
     app.sub_app_mut(RenderApp).add_systems(
         Render,
@@ -343,12 +346,28 @@ fn init(mut commands: Commands, mesh: Res<MeshPipeline>, assets: Res<AssetServer
     });
 }
 
+/// Pipeline choice beyond the view key: opaque or transmitting, frosted, GPU-selected,
+/// and the Eye-Dome depth redraw.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct Variant {
+    pub opaque: bool,
+    pub frost: bool,
+    pub selected: bool,
+    pub dome: bool,
+}
+
 impl SpecializedRenderPipeline for Pipeline {
-    type Key = (MeshPipelineKey, bool, bool, bool, MeshVertexBufferLayoutRef);
+    type Key = (MeshPipelineKey, Variant, MeshVertexBufferLayoutRef);
     fn specialize(
         &self,
-        (key, opaque, frost, selected, layout): Self::Key,
+        (key, variant, layout): Self::Key,
     ) -> RenderPipelineDescriptor {
+        let Variant {
+            opaque,
+            frost,
+            selected,
+            dome,
+        } = variant;
         let mut descriptor = self
             .mesh
             .specialize(key, &layout)
@@ -369,6 +388,7 @@ impl SpecializedRenderPipeline for Pipeline {
         descriptor.multisample = state.multisample();
         let fragment = descriptor.fragment.as_mut().unwrap();
         fragment.shader = self.shader.clone();
+        fragment.entry_point = Some(if dome { "dome" } else { "fragment" }.into());
         if selected {
             descriptor.vertex.shader_defs.push("CLOUD_LOD".into());
             fragment.shader_defs.push("CLOUD_LOD".into());
@@ -387,6 +407,16 @@ impl SpecializedRenderPipeline for Pipeline {
         }
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
             *depth = state.depth(depth.format);
+        }
+        if dome {
+            descriptor.vertex.shader_defs.push("CLOUD_DOME".into());
+            let fragment = descriptor.fragment.as_mut().unwrap();
+            fragment.targets = vec![Some(ColorTargetState {
+                format: dome::FORMAT,
+                blend: None,
+                write_mask: ColorWrites::ALL,
+            })];
+            descriptor.multisample = MultisampleState::default();
         }
         descriptor
     }
@@ -1287,20 +1317,28 @@ fn queue(
                 if required & (1 << index) == 0 {
                     continue;
                 }
-                let is_opaque = index == 0;
-                let frost = !is_opaque && style.style.effects.z > 0.0;
-                let pipeline_id = variants.specialize(
-                    &pipelines,
-                    &pipeline,
-                    (key, is_opaque, frost, false, shared.layout.clone()),
-                );
+                let variant = Variant {
+                    opaque: index == 0,
+                    frost: index != 0 && style.style.effects.z > 0.0,
+                    selected: false,
+                    dome: false,
+                };
+                let pipeline_id =
+                    variants.specialize(&pipelines, &pipeline, (key, variant, shared.layout.clone()));
                 if pipelines.get_render_pipeline(pipeline_id).is_some() {
                     *id = Some(pipeline_id);
                 }
                 let indexed = variants.specialize(
                     &pipelines,
                     &pipeline,
-                    (key, is_opaque, frost, true, shared.layout.clone()),
+                    (
+                        key,
+                        Variant {
+                            selected: true,
+                            ..variant
+                        },
+                        shared.layout.clone(),
+                    ),
                 );
                 if pipelines.get_render_pipeline(indexed).is_some() {
                     indexed_ids[index] = Some(indexed);
@@ -1517,6 +1555,79 @@ fn queue(
     frontiers.0 = Some(selection);
 }
 
+/// The bind groups and draw call one page issues in a view this frame.
+struct PageDraw<'w> {
+    page: &'w BindGroup,
+    style: &'w BindGroup,
+    call: PageCall<'w>,
+}
+
+enum PageCall<'w> {
+    /// The view's GPU LOD pass wrote the instance count into the heads buffer.
+    Selected(&'w Buffer, u64),
+    Range(std::ops::Range<u32>),
+}
+
+impl<'w> PageDraw<'w> {
+    fn find(
+        cache: &'w Cache,
+        selections: &'w selection::Views,
+        view: RetainedViewEntity,
+        samples: u32,
+        frost: bool,
+        entity: Entity,
+    ) -> Option<Self> {
+        let selected = selections.page(view, entity)?;
+        let page = cache
+            .pages
+            .get(&(entity, selected.tier))
+            .filter(|page| page.count > 0)?;
+        let style = cache.styles.get(&page.style)?;
+        if !style.generation.lifetime.is_live()
+            || (style.generation.needs_frost(samples) && !frost)
+            || !selected.dataset.lifetime.is_live()
+        {
+            return None;
+        }
+        let style = style.group.as_ref()?;
+        let (page, call) = match (selected.slot, selections.heads(view)) {
+            (Some(slot), Some(heads)) => (
+                selected.group.as_ref()?,
+                PageCall::Selected(heads, u64::from(slot) * gpu::HEAD_STRIDE),
+            ),
+            (Some(_), None) => return None,
+            (None, _) => (&page.group, PageCall::Range(selected.range.clone())),
+        };
+        Some(Self { page, style, call })
+    }
+
+    fn selected(&self) -> bool {
+        matches!(self.call, PageCall::Selected(..))
+    }
+
+    fn issue(self, pass: &mut TrackedRenderPass<'w>) {
+        pass.set_bind_group(2, self.page, &[]);
+        pass.set_bind_group(3, self.style, &[]);
+        match self.call {
+            PageCall::Selected(heads, offset) => pass.draw_indirect(heads, offset),
+            PageCall::Range(range) => pass.draw(0..6, range),
+        }
+    }
+}
+
+/// Whether an opaque cloud page queued for `view` asks for Eye-Dome Lighting.
+fn shaded(cache: &Cache, selections: &selection::Views, view: RetainedViewEntity) -> bool {
+    cache.opaque.get(&view).is_some_and(|items| {
+        items.iter().any(|(entity, _)| {
+            selections
+                .page(view, *entity)
+                .and_then(|selected| cache.pages.get(&(*entity, selected.tier)))
+                .and_then(|page| cache.styles.get(&page.style))
+                .is_some_and(|style| style.style.shading.x > 0.0)
+        })
+    })
+}
+
 type DrawCloud<const OPAQUE: bool> = (
     SetItemPipeline,
     SetMeshViewBindGroup<0>,
@@ -1543,49 +1654,17 @@ impl<P: PhaseItem, const OPAQUE: bool> RenderCommand<P> for DrawPage<OPAQUE> {
         (cache, receipts, selections): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let cache = cache.into_inner();
-        let selections = selections.into_inner();
-        let Some(selected) = selections.page(view.retained_view_entity, item.entity()) else {
+        let Some(draw) = PageDraw::find(
+            cache.into_inner(),
+            selections.into_inner(),
+            view.retained_view_entity,
+            msaa.samples(),
+            frost.is_some(),
+            item.entity(),
+        ) else {
             return RenderCommandResult::Skip;
         };
-        let Some(page) = cache
-            .pages
-            .get(&(item.entity(), selected.tier))
-            .filter(|page| page.count > 0)
-        else {
-            return RenderCommandResult::Skip;
-        };
-        let Some(style) = cache.styles.get(&page.style) else {
-            return RenderCommandResult::Skip;
-        };
-        if !style.generation.lifetime.is_live() {
-            return RenderCommandResult::Skip;
-        }
-        if style.generation.needs_frost(msaa.samples()) && frost.is_none() {
-            return RenderCommandResult::Skip;
-        }
-        let Some(group) = style.group.as_ref() else {
-            return RenderCommandResult::Skip;
-        };
-        if !selected.dataset.lifetime.is_live() {
-            return RenderCommandResult::Skip;
-        }
-        match (selected.slot, selections.heads(view.retained_view_entity)) {
-            (Some(slot), Some(heads)) => {
-                let Some(lod_group) = selected.group.as_ref() else {
-                    return RenderCommandResult::Skip;
-                };
-                pass.set_bind_group(2, lod_group, &[]);
-                pass.set_bind_group(3, group, &[]);
-                pass.draw_indirect(heads, u64::from(slot) * gpu::HEAD_STRIDE);
-            }
-            (Some(_), None) => return RenderCommandResult::Skip,
-            (None, _) => {
-                pass.set_bind_group(2, &page.group, &[]);
-                pass.set_bind_group(3, group, &[]);
-                pass.draw(0..6, selected.range.clone());
-            }
-        }
+        draw.issue(pass);
         receipts.into_inner().drawn(
             view.retained_view_entity,
             item.entity(),

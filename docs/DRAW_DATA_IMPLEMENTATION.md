@@ -22,7 +22,7 @@ Do not run `oslo make docs`: that existing recipe stages and commits the working
 | 10 surfels and mesh blocks | Verified | [Phase 10 checkpoint](../plans/research/phase10-surfaces-checkpoint.md): oriented discs, indexed blocks, normal arrows, dirty-block reuse, `surface-lab`; `test-draw-surfaces` |
 | 11 sparse volumes | Verified | [Phase 11 checkpoint](../plans/research/phase11-volumes-checkpoint.md): TSDF/ESDF/scalar blocks, slices with unknown checker, bands and contours, `FIELD_QUERY` with support and spacing, `distance-field-lab`; `test-draw-fields` |
 | 12 layered elevation | Verified | [Phase 12 checkpoint](../plans/research/phase12-elevation-checkpoint.md): shared geometry, real holes, layer-only updates, rolling windows equal to a fresh map, `terrain-layers`; `test-draw-fields` |
-| 13 final catalogue | Verified, EDL deferred | [Phase 13 checkpoint](../plans/research/phase13-catalogue-checkpoint.md): `preview-draw-overview`, `capture-draw-overview`, shared page acquisition, guide and protocol docs. Eye-Dome Lighting is not implemented. User visual approval is separate and not yet given |
+| 13 final catalogue | Verified | [Phase 13 checkpoint](../plans/research/phase13-catalogue-checkpoint.md): `preview-draw-overview`, `capture-draw-overview`, shared page acquisition, guide and protocol docs. Multi-scale Eye-Dome Lighting for opaque cloud points, 2026-11-15 (below). User visual approval is separate and not yet given |
 
 ## Removed 2026-11-13 by the user
 
@@ -35,6 +35,50 @@ Everything that was neither visualization nor the simulator:
 - the research, audit and recheck documents.
 
 Sections below that describe these are history.
+
+## Eye-Dome Lighting — 2026-11-15
+
+Clouds take an `eye_dome` strength (0 off, cloud datasets only). A view with such a cloud
+redraws its opaque pages after the opaque pass with the cloud shader's `dome` entry: a
+depth-only variant (`CLOUD_DOME` skips the colour transfer) into a per-view `Rg32Float`
+texture holding hardware depth and strength, with its own depth buffer. The redraw keeps a
+pixel when its centre lies inside the splat, as the single-sample opaque pass does, and at
+half coverage under MSAA. The texture has three mip levels: `pull` fills levels 1 and 2
+with the nearest splat of each 2x2 block (the pull step of pull-push hole filling; the last
+row and column also take an odd remainder). `draw_cloud_dome.wesl` then runs full-screen
+with the view's depth buffer. At each level it computes Potree's `edl.fs` response at
+radius 1, `exp(-300 × strength × r / scale)`, and mixes the levels as CloudCompare's
+`edl_mix.frag` does (weights 1, 1/2, 1/4). Coarse levels are sampled bilinearly. Each tap
+is also weighted by its ring's filled share (lone points' empty rings give no say) and by
+a Gaussian on its log2 distance gap from the pixel, sigma 0.01 per pixel of scale. That
+gap weight replaces CloudCompare's bilateral blur and keeps a far surface's shade off a
+nearer one. The pass accumulates darkness rather than shade, so an unshaded pixel stays
+exactly 1 under the GPU's approximate division. It multiplies the scene colour and
+depth-tests `GreaterEqual` against the main depth, so anything drawn nearer stays
+unshaded. Opaque points keep their own pass and anti-aliased edges. The extra cost is one
+vertex pass over the drawn points, two small pull passes and one full-screen pass of up to
+81 texel loads per point pixel, only in views that need it. The textures are charged as
+auxiliary GPU bytes; without room the view draws its points unshaded.
+
+`oslo make test-draw-cloud-dome` runs five GPU checks against a CPU reference of the
+three levels. Each check fails with one of these broken: the coarse levels, the depth gap
+weight, the ring-fill weight, the level weights, the nearest-splat pull or its odd
+remainder, the coverage rule, the opacity discard, or the depth test.
+
+Headless captures (1600x1000, `GEARBOX_CLOUD_EYE_DOME=S` on the survey example at its own
+0.8 px). Single-scale shading moved the overview's luminance by under 1/255 at strength 1
+and only speckled at 8, because most ring neighbours were empty. With three levels:
+
+| View | Mean difference at strength 1 | Mean difference at strength 3 |
+|---|---|---|
+| Overview | 1.7/255 | 2.5/255 |
+| Near | 4.2/255 | 7.4/255 |
+| Grazing | 2.2/255 | 3.7/255 |
+
+The near hill's flanks darken smoothly toward its silhouette, without speckle. No catalogue
+dataset enables it yet. The first native run caught a cloud pipeline without a named
+fragment entry point, which wgpu rejects once the shader has two; every cloud and dome
+pipeline now names one.
 
 ## GPU level of detail — 2026-11-14
 

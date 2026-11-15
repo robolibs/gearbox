@@ -380,7 +380,8 @@ helpers test the contract, not integration into the existing world renderer or s
 
 Presentation declares constant/RGBA/scalar/category/axis/range/age colors, occupancy
 state/probability/depth palettes, explicit pixel/metre radius, optional metric radius
-attribute, opacity/glow/blur, and bounded octree display settings. Age selects its
+attribute, opacity/glow/blur, Eye-Dome Lighting strength `eye_dome` (0–8, cloud
+datasets only, omitted at 0), and bounded octree display settings. Age selects its
 clock explicitly. Attribute selectors retain coexisting columns. Unknown octree views
 require a finite ROI and a 1–1,000,000 cell budget. The compact cloud renderer consumes
 the cloud presentation fields; typed occupancy rendering remains pending.
@@ -777,6 +778,33 @@ Its twelve images include old-generation continuity and clear positive/negative 
 `test-draw-auxiliary-fixtures` covers the image oracle and extent/format byte calculation.
 Neither gate establishes full CPU cache accounting, device-loss recovery or later LOD.
 
+### Eye-Dome Lighting
+
+A cloud with `eye_dome` above 0 shades its opaque points by depth, as CloudCompare
+and Potree do, at full, half and quarter resolution. At each scale `s` (1, 2, 4 pixels
+per texel) a texel's shade is `exp(-300 × strength × r / s)`, where `r` is the mean over
+its eight ring texels of how much nearer each one is, in log2 view distance. A coarse
+texel holds the nearest point of its 2x2 block of the finer level, so the half and
+quarter levels close the gaps between sparse points. A point pixel mixes its own shade
+with the four nearest texels of each coarse level, weighted 1, 1/2 and 1/4 per level
+(CloudCompare's mix), bilinearly, by the share of each ring that holds points, and by
+depth agreement: a coarse texel whose distance differs from the pixel's by much more than
+1% per pixel of its scale belongs to another surface and is left out. Neighbours are
+opaque cloud pixels of any dataset; empty pixels and other geometry do not count.
+Interiors of flat surfaces keep their colour, and silhouettes in front of farther points
+stay lit while the points behind them darken over a band up to about eight pixels wide.
+
+A view that draws such a cloud redraws its opaque pages depth-only into level 0 of a
+per-view `Rg32Float` dome texture with its own `Depth32Float` buffer, after the opaque pass
+and before transmission. Two passes fill the half and quarter levels, then a full-screen
+pass multiplies the scene by the shade where nothing nearer than the point was drawn. The
+textures (about 14.5 bytes per pixel) are auxiliary GPU bytes in `resources.gpu_bytes`.
+Views narrower or shorter than 4 pixels, or without room for the textures, draw their
+points unshaded and retry on later frames; there is no status for this. Translucent
+points are not shaded. `oslo make test-draw-cloud-dome` checks the shade against a CPU
+reference of the three levels, sparse points, depth gating, the 2x2 pull on odd sizes,
+and that the redraw covers exactly the pixels the single-sample opaque pass draws.
+
 ### Integrated million-point example
 
 `oslo make preview-draw-cloud-scale` builds the normal viewer and opens one million
@@ -1024,5 +1052,4 @@ is absolute.
 
 ## Not implemented
 
-- Eye-Dome Lighting (Phase 13, deferred).
 - LOD error and upload work in `STATUS`; the `draw-probes` recorder tracks them per frame.

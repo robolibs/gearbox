@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn upload_oracle_rejects_extra_records_missing_metadata_and_decreasing_counters() {
         let allocations = Allocations {
-            styles: 5184,
+            styles: 5200,
             placements: 3328,
             ..Default::default()
         };

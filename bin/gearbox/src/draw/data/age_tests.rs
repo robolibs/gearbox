@@ -30,7 +30,7 @@ fn age_uniform_layout_is_charged_per_page_not_per_point() {
     assert_eq!(&encoded[224..240], bytemuck::cast_slice::<u32, u8>(&[2, 4, 0, 9]));
     assert_eq!(
         uniform_bytes(&Style::new(&Presentation::default())).len(),
-        5184
+        5200
     );
 }
 

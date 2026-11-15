@@ -301,6 +301,9 @@ impl DataDescriptor {
         if self.presentation.volume.is_some() && !matches!(self.shape, DataShape::Volume { .. }) {
             return Err("volume views need a volume dataset".into());
         }
+        if self.presentation.eye_dome > 0.0 && !matches!(self.shape, DataShape::Cloud { .. }) {
+            return Err("eye-dome lighting shades cloud datasets only".into());
+        }
         if let StreamMode::Accumulate {
             max_scans,
             max_age_s,

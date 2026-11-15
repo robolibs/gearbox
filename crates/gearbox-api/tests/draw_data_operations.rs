@@ -281,6 +281,32 @@ fn status_requires_nonzero_requested_generation_and_complete_view_identity() {
 }
 
 #[test]
+fn eye_dome_is_a_bounded_strength_for_cloud_datasets_left_out_when_off() {
+    let off = serde_json::to_value(Presentation::default()).unwrap();
+    assert!(off.get("eye_dome").is_none(), "an unshaded presentation keeps its old encoding");
+    let shaded = Presentation { eye_dome: 1.5, ..Presentation::default() };
+    let encoded = serde_json::to_value(&shaded).unwrap();
+    assert_eq!(encoded["eye_dome"], 1.5);
+    assert_eq!(serde_json::from_value::<Presentation>(encoded).unwrap(), shaded);
+    for strength in [0.0, 1.5, 8.0] {
+        Presentation { eye_dome: strength, ..Presentation::default() }.validate_intrinsic().unwrap();
+    }
+    for strength in [-0.1, 8.5, f32::NAN, f32::INFINITY] {
+        let p = Presentation { eye_dome: strength, ..Presentation::default() };
+        assert!(p.validate_intrinsic().is_err(), "strength {strength} is rejected");
+    }
+    let cloud = DataDescriptor { presentation: shaded.clone(), ..contracts::cloud() };
+    cloud.validate().unwrap();
+    let octree = contracts::octree();
+    let shaded_octree = DataDescriptor {
+        presentation: Presentation { eye_dome: 1.5, ..octree.presentation.clone() },
+        ..octree.clone()
+    };
+    octree.validate().unwrap();
+    assert!(shaded_octree.validate().is_err(), "only cloud points are shaded");
+}
+
+#[test]
 fn presentation_patches_validate_intrinsics_without_inventing_a_dataset() {
     let mut p = Presentation::default();
     p.blur = 1.1;

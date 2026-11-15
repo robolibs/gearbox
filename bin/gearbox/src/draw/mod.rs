@@ -60,6 +60,7 @@ impl Plugin for DrawPlugin {
         bevy::shader::load_shader_library!(app, "draw_cloud_color.wesl");
         bevy::shader::load_shader_library!(app, "draw_cloud.wesl");
         bevy::shader::load_shader_library!(app, "draw_cloud_lod.wesl");
+        bevy::shader::load_shader_library!(app, "draw_cloud_dome.wesl");
         bevy::shader::load_shader_library!(app, "draw_octree.wesl");
         bevy::shader::load_shader_library!(app, "draw_stroke.wesl");
         bevy::shader::load_shader_library!(app, "draw_surface.wesl");
