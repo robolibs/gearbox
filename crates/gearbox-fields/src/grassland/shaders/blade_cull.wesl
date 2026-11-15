@@ -277,8 +277,10 @@ fn sow(index: u32, twin: bool) -> Blade {
     let roll = scatter_roll(wheel_roll(pressed), (rand(id, 37u) - 0.5) * 0.6);
     let up = vec3<f32>(0.0, 1.0, 0.0);
     let press = smoothstep(0.0, mix(0.4, 1.0, rand(id, 36u)), flat) * field.wheels.bend;
-    let tip = mix((up + lean + sway_tip * (1.0 - flat)) * height, (roll * 0.92 + up * 0.06) * height, press);
-    let mid = mix((up * 0.6 + lean * 0.2 + sway_mid * (1.0 - flat)) * height, (roll * 0.5 + up * 0.07) * height, press);
+    // A pressed blade lies on the ground, along the roll turned into its slope.
+    let lay = normalize(roll - ground_normal * dot(roll, ground_normal) + vec3<f32>(1e-5, 0.0, 0.0));
+    let tip = mix((up + lean + sway_tip * (1.0 - flat)) * height, (lay * 0.92 + ground_normal * 0.06) * height, press);
+    let mid = mix((up * 0.6 + lean * 0.2 + sway_mid * (1.0 - flat)) * height, (lay * 0.5 + ground_normal * 0.07) * height, press);
 
     // Dark roots to bright tips, the tip colour set by the clump; patches a
     // few metres across and tufts under a metre shade the sward from above.

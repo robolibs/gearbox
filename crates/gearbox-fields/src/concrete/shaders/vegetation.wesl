@@ -161,11 +161,12 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let downwind = vec3<f32>(gust.x, 0.0, gust.y);
     let up = vec3<f32>(0.0, 1.0, 0.0);
 
-    // A leaf arched out of the gap; a tyre lays it along its roll.
+    // A leaf arched out of the gap; a tyre lays it on the ground along its roll.
+    let lay = normalize(roll - ground_normal * dot(roll, ground_normal) + vec3<f32>(1e-5, 0.0, 0.0));
     let tip = mix((up * (1.0 - 0.35 * arch) + out_dir * arch + downwind * gust.w) * height,
-        (roll * 0.9 + up * 0.05) * height, press);
+        (lay * 0.9 + ground_normal * 0.05) * height, press);
     let mid = mix((up * 0.58 + out_dir * (0.3 * arch) + downwind * (gust.z * 0.3)) * height,
-        (roll * 0.45 + up * 0.06) * height, press);
+        (lay * 0.45 + ground_normal * 0.06) * height, press);
     let curve = mid * (2.0 * t * (1.0 - t)) + tip * (t * t);
     let tangent = normalize(mix(mid * 2.0, (tip - mid) * 2.0, t) + up * 1e-4);
     let across = normalize(cross(tangent, out_dir) + vec3<f32>(1e-5, 0.0, 0.0));

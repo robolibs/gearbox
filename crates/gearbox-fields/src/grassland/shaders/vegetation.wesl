@@ -270,10 +270,12 @@ fn meadow_grass(base: vec2<f32>, ground: vec3<f32>, ground_normal: vec3<f32>, id
     let leans = gust.zw;
     let sway_mid = downwind * leans.x * 0.3;
     let sway_tip = downwind * leans.y;
+    // A pressed leaf lies on the ground, along the roll turned into its slope.
+    let lay = normalize(roll - ground_normal * dot(roll, ground_normal) + vec3<f32>(1e-5, 0.0, 0.0));
     let tip = mix((up * (1.0 - 0.4 * arch) + out_dir * arch + sway_tip * (1.0 - flat)) * height,
-        (roll * 0.92 + up * 0.06) * height, press);
+        (lay * 0.92 + ground_normal * 0.06) * height, press);
     let mid = mix((up * 0.6 + out_dir * (0.3 * arch) + sway_mid * (1.0 - flat)) * height,
-        (roll * 0.5 + up * 0.07) * height, press);
+        (lay * 0.5 + ground_normal * 0.07) * height, press);
 
     let axis = normalize(bezier_tangent(mid, tip, t) + up * 1e-4);
     let right = normalize(cross(axis, out_dir) + vec3<f32>(1e-5, 0.0, 0.0));
