@@ -673,19 +673,19 @@ fn rut_of(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
 // down to the order a HashMap iterated, so a machine had some wheels drawn from
 // the line and some from the raster, with nothing to say why. There is a test
 // that fails if these two numbers ever part company again.
+// Points to a block of the line, `contacts::TRAIL_CHUNK`: a cover skips a
+// whole block when the pixel lies outside its box.
+const TRAIL_CHUNK: i32 = 32;
+
 struct DrivenTrail {
     bar: vec4<f32>,
     count: vec4<f32>,
-    points: array<vec4<f32>, 512>,
-    // How hard the tyre bore on the ground at each of those points, in
-    // kilopascals, in `.x`; a column each and the rest spare.
-    //
-    // Four to a column would be a quarter of the room, and was — but reading
-    // one then needs `hard[i / 4u][i % 4u]`, which picks a *vector component*
-    // by a value only known while running. That is the sort of thing that
-    // compiles without a word and then does not read what was written. A whole
-    // column each costs eight kilobytes and is indexed by nothing but a plain
-    // array subscript and a fixed component.
-    hard: array<vec4<f32>, 512>,
+    points: array<vec4<f32>, 2048>,
+    // Load in kilopascals and how much of the mark is left, two points to a
+    // column: the even point in `.xy`, the odd in `.zw`, picked by `select`
+    // and never by a component index known only while running.
+    hard: array<vec4<f32>, 1024>,
+    // Each block's box: min xy, max xy.
+    boxes: array<vec4<f32>, 64>,
 }
 

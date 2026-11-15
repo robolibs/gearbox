@@ -10,7 +10,7 @@ import bevy_pbr::render::{
 import gearbox_fields::grassland::shaders::palette::{noise, meadow_pattern, meadow_canopy, meadow_tint, meadow_pocket_blend, grass_species, species_tint, dry_country};
 import gearbox_fields::shaders::surface_detail::{surface_footprint, filtered_clumps, fiber_stamp};
 import gearbox_fields::shaders::surface_detail::{SurfaceGeometryParams, surface_geometry_normal, surface_relief, surface_lighting};
-import gearbox_fields::bare::shaders::cover::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, tyre_bars, DrivenTrail, TREAD_SHOW, UNDER_SHOW, SEPARATE_M, TREAD_DEBUG, tread_checker, lattice};
+import gearbox_fields::bare::shaders::cover::{TRAIL_CHUNK, worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, tyre_bars, DrivenTrail, TREAD_SHOW, UNDER_SHOW, SEPARATE_M, TREAD_DEBUG, tread_checker, lattice};
 import gearbox_fields::shaders::interaction::{WheelMapParams, sample_wheels, wheel_scar};
 
 
@@ -118,6 +118,13 @@ fn trail_print(place: vec2<f32>, footprint: f32, pressed: f32) -> Driven {
     var under_half = 0.0;
     var under_heading = vec2<f32>(1.0, 0.0);
     for (var i = 1; i < count; i = i + 1) {
+        // A whole block of the line goes by when this point is outside its box.
+        let block = i / TRAIL_CHUNK;
+        let bounds = driven.boxes[block];
+        if (any(place < bounds.xy) || any(place > bounds.zw)) {
+            i = (block + 1) * TRAIL_CHUNK - 1;
+            continue;
+        }
         let to = driven.points[i];
         // A run's first point begins a line rather than continuing one.
         if (to.w < 0.0) {
@@ -148,8 +155,10 @@ fn trail_print(place: vec2<f32>, footprint: f32, pressed: f32) -> Driven {
             best_along = along;
             best_half = abs(to.w);
             best_heading = heading;
-            best_hard = driven.hard[i].x;
-            best_fade = driven.hard[i].y;
+            let column = driven.hard[i / 2];
+            let load = select(column.xy, column.zw, (i & 1) == 1);
+            best_hard = load.x;
+            best_fade = load.y;
         } else if (crosses && gap < under_gap) {
             under_gap = gap;
             under_across = across;

@@ -350,11 +350,13 @@ pub struct DrivenTrail {
     /// Each point: where the wheel's middle was, metres of line before it, and
     /// half the tyre's width — negative where a run begins.
     pub points: [Vec4; crate::contacts::TRAIL_POINTS],
-    /// How hard the tyre bore on the ground at each of those points, in
-    /// kilopascals, four to a column. Packed rather than given a column each
-    /// because a uniform pads a lone float out to four, and this is a long
-    /// array.
-    pub hard: [Vec4; crate::contacts::TRAIL_POINTS],
+    /// How hard the tyre bore on the ground at each point, in kilopascals,
+    /// then how much of its mark is left: two points to a column, the even
+    /// one in `.xy` and the odd in `.zw`.
+    pub hard: [Vec4; crate::contacts::TRAIL_POINTS / 2],
+    /// Each block of `TRAIL_CHUNK` points: the box (min xy, max xy) its
+    /// segments and their reach lie in; empty blocks hold an inside-out box.
+    pub boxes: [Vec4; crate::contacts::TRAIL_POINTS / crate::contacts::TRAIL_CHUNK],
 }
 
 impl Default for DrivenTrail {
@@ -363,22 +365,43 @@ impl Default for DrivenTrail {
             bar: crate::layout::TyreTread::default().packed(),
             count: Vec4::ZERO,
             points: [Vec4::ZERO; crate::contacts::TRAIL_POINTS],
-            hard: [Vec4::ZERO; crate::contacts::TRAIL_POINTS],
+            hard: [Vec4::ZERO; crate::contacts::TRAIL_POINTS / 2],
+            boxes: [Vec4::new(1.0, 1.0, -1.0, -1.0); crate::contacts::TRAIL_POINTS / crate::contacts::TRAIL_CHUNK],
         }
     }
 }
 
 impl DrivenTrail {
     pub fn of(trails: &crate::contacts::WheelTrails) -> Self {
+        use crate::contacts::{TRAIL_CHUNK, TRAIL_POINTS};
         let mut out = Self { bar: trails.bar, ..Default::default() };
-        for (slot, point) in out.points.iter_mut().zip(&trails.points) {
+        let points = &trails.points[..trails.points.len().min(TRAIL_POINTS)];
+        for (slot, point) in out.points.iter_mut().zip(points) {
             *slot = Vec4::new(point.at.x, point.at.y, point.along, point.half_width);
         }
-        for (slot, point) in trails.points.iter().take(crate::contacts::TRAIL_POINTS).enumerate() {
-            out.hard[slot].x = point.ground_kpa;
-            out.hard[slot].y = point.fade;
+        for (slot, point) in points.iter().enumerate() {
+            let column = &mut out.hard[slot / 2];
+            if slot % 2 == 0 {
+                (column.x, column.y) = (point.ground_kpa, point.fade);
+            } else {
+                (column.z, column.w) = (point.ground_kpa, point.fade);
+            }
         }
-        out.count.x = trails.points.len().min(crate::contacts::TRAIL_POINTS) as f32;
+        // A segment ends at its point and starts at the one before; a cover
+        // reads it up to three half widths off its line.
+        for (block, bounds) in out.boxes.iter_mut().enumerate() {
+            let first = (block * TRAIL_CHUNK).max(1);
+            let last = ((block + 1) * TRAIL_CHUNK).min(points.len());
+            if first >= last {
+                continue;
+            }
+            let ends = &points[first - 1..last];
+            let reach = ends.iter().map(|point| point.half_width.abs()).fold(0.0, f32::max) * 3.0;
+            let low = ends.iter().map(|point| point.at).reduce(Vec2::min).unwrap() - reach;
+            let high = ends.iter().map(|point| point.at).reduce(Vec2::max).unwrap() + reach;
+            *bounds = Vec4::new(low.x, low.y, high.x, high.y);
+        }
+        out.count.x = points.len() as f32;
         out
     }
 }

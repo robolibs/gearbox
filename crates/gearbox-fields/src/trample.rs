@@ -48,18 +48,19 @@ pub fn age(now: f32, stamped: f32) -> f32 {
 }
 
 /// The stamp a texel keeps. Tracks join rather than replace: the texel keeps
-/// the deeper of the two distances, and a tyre over it now marks it pressed
-/// now, with its own roll and tread.
+/// the deeper of the two distances; a tyre over it now lays its roll and
+/// tread, and where both pressed it the harder press stands.
 pub fn merged(old: [u16; 4], new: [u16; 4], now: f32, horizon: f32) -> [u16; 4] {
     if !texel_stamped(old) || age(now, texel_time(old)) >= horizon {
         return new;
     }
     let (was, is) = (texel_inside(old), texel_inside(new));
+    let harder = if age(now, texel_time(old)) < age(now, texel_time(new)) { old[0] } else { new[0] };
     if is >= was {
-        return new;
+        return if was > 0.0 { [harder, new[1], new[2], new[3]] } else { new };
     }
     if is > 0.0 {
-        return [new[0], (new[1] & 0xff00) | (old[1] & 0x00ff), new[2], new[3]];
+        return [harder, (new[1] & 0xff00) | (old[1] & 0x00ff), new[2], new[3]];
     }
     old
 }
@@ -263,6 +264,10 @@ mod tests {
         assert!((texel_inside(kept) - texel_inside(deep)).abs() < 1e-6);
         assert_eq!(kept[0], shallow[0]);
         assert_eq!(kept[2], 7);
+        let light = { let [t, g] = trample_texel(20.0 - 200.0, Vec2::Y, 1.4, 0.5); [t, g, 5, 5] };
+        let lifted = merged(deep, light, 20.0, 720.0);
+        assert_eq!(lifted[0], deep[0], "a wheel riding high lightened a full press");
+        assert!((texel_inside(lifted) - texel_inside(light)).abs() < 1e-6);
         let outside = { let [t, g] = trample_texel(20.0, Vec2::Y, -0.6, 0.5); [t, g, 0, 0] };
         assert_eq!(merged(deep, outside, 20.0, 720.0), deep);
         assert_eq!(merged(deep, outside, 900.0, 720.0), outside);

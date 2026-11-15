@@ -2616,15 +2616,16 @@ fn record_wheel_tracks(
             let axle_world = body.rotation() * axle_local;
             // Where the tyre meets the terrain: the point of its rim nearest
             // the ground under it, which on a slope lies beside the hub. It
-            // presses the sward while that point is within the slack of the
-            // ground, touching or bounced just off it.
+            // presses the sward while that point is within reach of the
+            // ground, the harder the nearer.
             let hub = Vec3::new(p.x as f32, p.y as f32, p.z as f32);
             let axle_dir = Vec3::new(axle_world.x as f32, axle_world.y as f32, axle_world.z as f32).normalize_or(Vec3::X);
             let slope = terrain_normal(hub.x, hub.z);
             let down = (axle_dir * axle_dir.dot(slope) - slope).normalize_or(Vec3::NEG_Y);
             let rim = hub + down * radius as f32;
             let ground = crate::world::terrain_height_m(rim.x, rim.z);
-            if rim.y > ground + WHEEL_TRACK_CONTACT_SLACK_M {
+            let press = 1.0 - (rim.y - ground).max(0.0) / WHEEL_PRESS_REACH_M;
+            if press <= 0.0 {
                 continue;
             }
             let contact_point = Vec3::new(rim.x, ground, rim.z);
@@ -2690,13 +2691,15 @@ fn record_wheel_tracks(
                 anchor,
                 centreline,
                 wheel,
+                press,
             });
         }
     }
 }
 
-/// A wheel counts as on the ground while its lowest point is this close.
-const WHEEL_TRACK_CONTACT_SLACK_M: f32 = 0.08;
+/// A tyre presses the sward fully on the ground, less as its rim rides higher,
+/// and not at all this far above it: about the height the grass stands.
+const WHEEL_PRESS_REACH_M: f32 = 0.15;
 
 /// Up from the terrain at `(x, z)`, from its heights a short step either side.
 fn terrain_normal(x: f32, z: f32) -> Vec3 {

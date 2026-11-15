@@ -43,6 +43,9 @@ pub struct WheelContact {
     pub ground_kpa: f32,
     /// Which wheel this is, the same from frame to frame.
     pub wheel: u64,
+    /// How hard it lays the sward over, 0..1: fully on the ground, less as
+    /// it rides higher over it.
+    pub press: f32,
 }
 
 impl WheelContact {
@@ -62,6 +65,7 @@ fn explicit_wheel_footprint_overrides_field_default() {
         scrub: 0.0,
         ground_kpa: 100.0,
         wheel: 0,
+        press: 1.0,
         travelled: 0.0,
         anchor: Vec2::ZERO,
         centreline: Vec2::ZERO,
@@ -79,7 +83,11 @@ fn explicit_wheel_footprint_overrides_field_default() {
 /// How many points of driven line the covers can read. The tread is only drawn
 /// near to — it fades out by its own pitch against the pixel long before this
 /// runs out — so this is the *recent* line and not the whole day's driving.
-pub const TRAIL_POINTS: usize = 512;
+pub const TRAIL_POINTS: usize = 2048;
+
+/// Points to a block of the line the covers skip whole when no point of it
+/// comes near; `TRAIL_CHUNK` in `bare/shaders/cover.wesl`.
+pub const TRAIL_CHUNK: usize = 32;
 
 /// Metres between the points a trail is kept as. Close enough that a turn is a
 /// smooth curve rather than a polygon, far enough that a hundred and twenty
@@ -134,12 +142,12 @@ pub struct TrailPoint {
 /// it would at speed. `TRAIL_POINTS` is still the ceiling — a wheel at working
 /// speed fills its share before this runs out — so this governs the slow end,
 /// which is where the old rule dropped a line almost at once.
-pub const TRAIL_KEEP_S: f32 = 90.0;
+pub const TRAIL_KEEP_S: f32 = 300.0;
 
 /// How long a mark holds at full strength before it starts to go. The rest of
 /// its life is spent easing out, so nothing ever pops: by `TRAIL_KEEP_S`, when
 /// the point is dropped, there is nothing left of it to drop.
-pub const TRAIL_HOLD_S: f32 = 35.0;
+pub const TRAIL_HOLD_S: f32 = 200.0;
 
 /// Every wheel's recent line, ready for the covers.
 #[derive(Resource, ExtractResource, Clone)]
@@ -327,21 +335,33 @@ fn off_the_chord(point: Vec2, before: Vec2, after: Vec2) -> f32 {
     ((point - before).perp_dot(chord) / length).abs()
 }
 
-    /// All the lines, flattened for the covers.
+    /// All the lines, flattened for the covers. Over `TRAIL_POINTS`, the oldest
+    /// end of whichever line is oldest goes first, so no line is ever cut off
+    /// whole and what goes is always the most faded mark.
     pub fn flattened(&self, now: f32) -> Vec<TrailPoint> {
-        let mut out = Vec::with_capacity(TRAIL_POINTS);
-        for run in self.runs.values() {
-            for point in run {
+        let mut runs: Vec<&[TrailPoint]> =
+            self.runs.values().map(Vec::as_slice).filter(|run| !run.is_empty()).collect();
+        let mut total: usize = runs.iter().map(|run| run.len()).sum();
+        while total > TRAIL_POINTS {
+            let oldest = (0..runs.len())
+                .filter(|&k| !runs[k].is_empty())
+                .min_by(|&a, &b| runs[a][0].seen.total_cmp(&runs[b][0].seen))
+                .expect("over budget means a point is left");
+            runs[oldest] = &runs[oldest][1..];
+            total -= 1;
+        }
+        let mut out = Vec::with_capacity(total);
+        for run in runs {
+            for (index, point) in run.iter().enumerate() {
                 // How much of a mark is left is a question about the clock and
                 // nothing else: it holds while it is fresh, eases off through
-                // its later life and is gone by the time it is dropped. How far
-                // behind the machine it lies has no bearing on it.
+                // its later life and is gone by the time it is dropped.
                 let age = (now - point.seen).max(0.0);
                 let going = ((age - TRAIL_HOLD_S) / (TRAIL_KEEP_S - TRAIL_HOLD_S)).clamp(0.0, 1.0);
-                out.push(TrailPoint { fade: 1.0 - going * going * (3.0 - 2.0 * going), ..*point });
+                let half_width = if index == 0 { -point.half_width.abs() } else { point.half_width };
+                out.push(TrailPoint { fade: 1.0 - going * going * (3.0 - 2.0 * going), half_width, ..*point });
             }
         }
-        out.truncate(TRAIL_POINTS);
         out
     }
 
@@ -374,9 +394,8 @@ pub fn tread_texel(along_m: f32, across_m: f32, half_width_m: f32) -> [u16; 2] {
     [along, across << 8 | half_width]
 }
 
-/// Gathers this frame's contacts into each wheel's line. Keyed by where the
-/// contacts sit in the list, which is the order the controller walks a
-/// machine's wheels and so holds from frame to frame.
+/// Gathers this frame's contacts into each wheel's line, keyed by the wheel
+/// itself, so a wheel off the ground for a frame cannot hand its line on.
 pub(super) fn keep_wheel_trails(
     contacts: Res<WheelContacts>,
     mut keeper: ResMut<TrailKeeper>,
@@ -387,9 +406,9 @@ pub(super) fn keep_wheel_trails(
         return;
     }
     let now = time.elapsed_secs();
-    for (index, contact) in contacts.contacts.iter().enumerate() {
+    for contact in &contacts.contacts {
         keeper.saw(
-            &index.to_string(),
+            &contact.wheel.to_string(),
             Vec2::new(contact.position.x, contact.position.z),
             contact.width * 0.5,
             contact.ground_kpa,
@@ -450,6 +469,34 @@ fn the_shader_holds_exactly_as_many_points_as_are_sent_to_it() {
         Some(TRAIL_POINTS),
         "the shader holds {declared} points and {TRAIL_POINTS} are sent"
     );
+    assert!(source.contains(&format!("hard: array<vec4<f32>, {}>", TRAIL_POINTS / 2)));
+    assert!(source.contains(&format!("boxes: array<vec4<f32>, {}>", TRAIL_POINTS / TRAIL_CHUNK)));
+    assert!(source.contains(&format!("const TRAIL_CHUNK: i32 = {TRAIL_CHUNK};")));
+}
+
+#[test]
+fn over_budget_the_oldest_ends_go_and_no_line_is_cut_off() {
+    let line = |count: usize, from: f32| -> Vec<TrailPoint> {
+        (0..count)
+            .map(|k| TrailPoint {
+                at: Vec2::new(k as f32 * TRAIL_STEP_M, from),
+                along: k as f32 * TRAIL_STEP_M,
+                half_width: if k == 0 { -0.2 } else { 0.2 },
+                seen: from + k as f32 * 0.01,
+                ground_kpa: 100.0,
+                fade: 1.0,
+            })
+            .collect()
+    };
+    let mut keeper = TrailKeeper::default();
+    keeper.runs.insert("old".into(), line(TRAIL_POINTS, 0.0));
+    keeper.runs.insert("new".into(), line(100, 50.0));
+    let flat = keeper.flattened(60.0);
+    assert_eq!(flat.len(), TRAIL_POINTS);
+    assert_eq!(flat.iter().filter(|point| point.at.y == 50.0).count(), 100, "the new line was cut");
+    let old: Vec<&TrailPoint> = flat.iter().filter(|point| point.at.y == 0.0).collect();
+    assert_eq!(old.len(), TRAIL_POINTS - 100);
+    assert!(old[0].half_width < 0.0 && old[0].at.x == 100.0 * TRAIL_STEP_M);
 }
 
 /// A mark goes by the clock and by nothing else. Driving on does not shorten
