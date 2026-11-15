@@ -204,8 +204,9 @@ def scenario(name: str, s: float, m: "Machine | None" = None) -> Scenario:
     if name in ("k_turn", "hairpin"):
         # A street too narrow to turn round in keeping `STREET_ROOM_M` off its
         # sides, wide enough for a three-point turn on arcs 1.1 times the
-        # tightest with that room: the path is that turn (`k_turn`) or a
-        # U-turn tighter than any the machine can make forward (`hairpin`).
+        # tightest with that room. The path is a plain U-turn back down it,
+        # tighter than any the machine can make forward: lanes as far apart as
+        # that turn leaves them (`k_turn`) or half as far (`hairpin`).
         machine = m or Machine("", "ackermann", 1.0, 1.0, 1.0, width=0.5 * s, length=0.8 * s)
         radius = turning_radius(m, s)
         turn, signs = three_point(1.1 * radius, 0.1 * s)
@@ -214,17 +215,13 @@ def scenario(name: str, s: float, m: "Machine | None" = None) -> Scenario:
         run_in = 8.0 * s
         x_turn = run_in
         poses = [(x_turn + x, y, a) for x, y, a in turn]
-        x_end, y_end = poses[-1][0], poses[-1][1]
+        y_end = poses[-1][1]
         before = [(x * s, 0.0) for x in [i * 0.5 for i in range(int(run_in / s / 0.5))]]
-        after = [(x_end - k * 0.5 * s, y_end) for k in range(1, 17)]
-        if name == "k_turn":
-            pts = before + [(x, y) for x, y, _ in poses] + after
-            speeds = [1.0] * len(before) + signs + [1.0] * len(after)
-        else:
-            r = 0.5 * y_end
-            arc = _arc(x_turn, r, r, -math.pi / 2, math.pi / 2, 24)
-            pts = before + arc + after
-            speeds = []
+        r = (0.5 if name == "k_turn" else 0.25) * y_end
+        arc = _arc(x_turn, r, r, -math.pi / 2, math.pi / 2, 24)
+        after = [(x_turn - k * 0.5 * s, 2.0 * r) for k in range(1, 17)]
+        pts = before + arc + after
+        speeds = []
         posts = street(lo - room, hi + room, -2.0 * s, x_turn + 1.5 * radius + machine.length, 0.15 * s, 0.9 * s)
         return Scenario(name, pts, speeds=speeds, reverse=True, static=posts, lost=4.0 * s, time_limit=60.0 * s)
     if name == "bumps":
