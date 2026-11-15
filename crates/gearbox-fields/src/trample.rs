@@ -48,22 +48,16 @@ pub fn horizon(recovery_seconds: f32) -> f32 {
     recovery_seconds.max(SCAR_SECONDS)
 }
 
-/// `new` laid over `old`: whichever lies deeper inside its tyre is kept, so
-/// a stamp's margin past its tyre never lifts what another wheel pressed and
-/// a turning wheel leaves the union of its poses. A wheel on the texel now
-/// marks it pressed now, whichever reading is kept.
+/// `new` laid over `old`. The last tyre on a texel prints it, press and
+/// tread; the margin a stamp lays past its tyre only takes texels no live
+/// press holds, nearer margins over farther ones.
 pub fn merged(old: [u16; 4], new: [u16; 4], now: f32, horizon: f32) -> [u16; 4] {
+    const INSIDE: f32 = 1.0 - 1e-3;
     if old[1] == 0 || stamp_age(now, old) >= horizon {
         return new;
     }
-    let (kept, fresh) = (across(old).abs(), across(new).abs());
-    if fresh < kept {
-        return new;
-    }
-    if fresh < 1.0 - 1e-3 {
-        return [new[0], old[1], old[2], old[3]];
-    }
-    old
+    let (was, is) = (across(old).abs(), across(new).abs());
+    if is < INSIDE || (was >= INSIDE && is <= was) { new } else { old }
 }
 
 impl Mirror {
@@ -138,19 +132,19 @@ mod tests {
     }
 
     #[test]
-    fn a_wheel_pressing_again_refreshes_the_time_and_keeps_the_deeper_reading() {
+    fn the_last_tyre_on_a_texel_prints_it() {
         let front = texel(10.0, 0.2);
         let rear_edge = texel(12.0, 0.7);
-        let kept = merged(front, rear_edge, 12.0, 720.0);
-        assert_eq!(kept[0], rear_edge[0]);
-        assert_eq!(kept[1], front[1]);
+        assert_eq!(merged(front, rear_edge, 12.0, 720.0), rear_edge);
     }
 
     #[test]
-    fn a_deeper_press_or_a_faded_mark_is_replaced() {
+    fn margins_fill_only_what_no_live_press_holds() {
         let margin = texel(10.0, 1.8);
         let inside = texel(11.0, 0.0);
         assert_eq!(merged(margin, inside, 11.0, 720.0), inside);
+        assert_eq!(merged(margin, texel(11.0, 1.4), 11.0, 720.0), texel(11.0, 1.4));
+        assert_eq!(merged(margin, texel(11.0, 2.6), 11.0, 720.0), margin);
         let old = texel(10.0, 0.0);
         let later_margin = texel(900.0, 2.0);
         assert_eq!(merged(old, later_margin, 900.0, 720.0), later_margin);
