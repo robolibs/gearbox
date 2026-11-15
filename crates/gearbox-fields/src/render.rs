@@ -28,7 +28,6 @@ use bevy::render::view::ExtractedView;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
 use super::contacts::{WheelContacts, trample_texel, tread_texel};
-use super::trample::{self, TrampleMirrors, merged};
 use super::profile::WheelMapParams;
 use bevy::platform::collections::HashMap;
 use std::ops::Range;
@@ -204,7 +203,6 @@ impl Plugin for VegetationPlugin {
                 init_vegetation_pipeline.after(MeshPipelineSystems),
             )
             .init_resource::<VegetationUniforms>()
-            .init_resource::<TrampleMirrors>()
             .add_systems(
                 Render,
                 (
@@ -512,21 +510,12 @@ fn stamp_wheel_contacts(
     contacts: Option<Res<WheelContacts>>,
     images: Res<RenderAssets<GpuImage>>,
     render_queue: Res<RenderQueue>,
-    mut mirrors: ResMut<TrampleMirrors>,
     mut stamped: Local<bevy::platform::collections::HashSet<Entity>>,
 ) {
     stamped.retain(|entity| fields.0.contains_key(entity));
     let Some(contacts) = contacts else {
         return;
     };
-    mirrors.sweep(
-        |id| {
-            fields.0.values().chain(&fields.1.fields)
-                .find(|field| field.trample.id() == *id)
-                .map(|field| trample::horizon(field.params.wheels.recovery_seconds))
-        },
-        contacts.now,
-    );
     if contacts.contacts.is_empty() {
         return;
     }
@@ -534,8 +523,6 @@ fn stamp_wheel_contacts(
         let Some(trample) = images.get(&field.trample) else {
             continue;
         };
-        let horizon = trample::horizon(field.params.wheels.recovery_seconds);
-        let mirror = mirrors.maps.entry(field.trample.id()).or_default();
         let tpm = field.params.wheels.texels_per_metre;
         let width = field.params.wheels.width as i32;
         let height = field.params.wheels.height as i32;
@@ -588,8 +575,14 @@ fn stamp_wheel_contacts(
                     .flat_map(|x| {
                         let d = Vec2::new(x as f32, z as f32) - centre;
                         let stamp = trample_texel(contacts.now, roll, d.dot(axle) / half_width, contact.scrub);
-                        // Every wheel lays its own tread; the stamp is merged
-                        // with the texel's old one, never written blind.
+                        // Every wheel lays its own tread, and none of them ever
+                        // writes the channels empty. A stamp replaces what was
+                        // there, so writing nothing *is* rubbing out: a tractor
+                        // steering one way and then the other sweeps its front
+                        // wheels across the tracks its rear wheels left, and a
+                        // narrow wheel told to lay no tread erased them at every
+                        // crossing. A wheel passing over an older mark lays its
+                        // own over the top, which is what happens on the ground.
                         let tread = field.tread.then(|| {
                             // How far along the track, measured from the wheel
                             // itself: the machine's rolled distance plus this
@@ -612,11 +605,7 @@ fn stamp_wheel_contacts(
                                 (Vec2::new(x as f32, z as f32) - line).dot(axle) / tpm,
                                 half_width / tpm)
                         });
-                        let [along, place] = tread.unwrap_or([0, 0]);
-                        let at = IVec2::new(x, z);
-                        let kept = merged(mirror.get(at), [stamp[0], stamp[1], along, place], contacts.now, horizon);
-                        mirror.set(at, kept, contacts.now);
-                        kept.into_iter().take(if field.tread { 4 } else { 2 })
+                        stamp.into_iter().chain(tread.into_iter().flatten())
                     })
                     .collect();
                 let texel_bytes = if field.tread { 8 } else { 4 };
@@ -1028,7 +1017,6 @@ fn carry_wheel_tracks(
     images: Res<RenderAssets<GpuImage>>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
-    mut mirrors: ResMut<TrampleMirrors>,
     mut carried: Local<bevy::platform::collections::HashSet<Entity>>,
 ) {
     carried.retain(|entity| fields.0.contains_key(entity));
@@ -1083,13 +1071,6 @@ fn carry_wheel_tracks(
                 Extent3d { width: extent.x, height: extent.y, depth_or_array_layers: 1 },
             );
             copied = true;
-            let moved = mirrors.maps.get(&old.trample.id()).map(|mirror| {
-                mirror.carried(from.as_ivec2(), to.as_ivec2(), extent.as_ivec2())
-            });
-            let mirror = mirrors.maps.entry(field.trample.id()).or_default();
-            for (at, texel, newest) in moved.into_iter().flatten() {
-                mirror.set(at, texel, newest);
-            }
         }
     }
     if copied {
