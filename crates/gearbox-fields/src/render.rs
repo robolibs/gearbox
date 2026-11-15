@@ -507,8 +507,8 @@ pub(crate) fn prepare_vegetation_bind_group(
 
 /// Longest pause, and furthest move, a wheel's stamp is swept across; past
 /// either it left the ground or was moved, and starts afresh.
-const SWEEP_GAP_S: f32 = 0.5;
-const SWEEP_GAP_M: f32 = 3.0;
+const SWEEP_GAP_S: f32 = 3.0;
+const SWEEP_GAP_M: f32 = 1.5;
 
 /// Lays the line each wheel drove since its last stamp into the wheel maps:
 /// a texel near it gets its distance inside the tyre's edge, merged with

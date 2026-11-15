@@ -232,16 +232,24 @@ pub(super) fn begin_wheel_contacts(mut contacts: ResMut<WheelContacts>, time: Re
 #[derive(Resource, Default)]
 pub struct TrailKeeper {
     runs: std::collections::HashMap<String, Vec<TrailPoint>>,
-    seen: std::collections::HashMap<String, f32>,
+    /// Each wheel's place this frame, the head its line is drawn up to.
+    live: std::collections::HashMap<String, TrailPoint>,
 }
 
+/// Longest pause, and furthest move, a wheel's line joins across; past either
+/// it left the ground or was moved, and a new run starts.
+pub const TRAIL_JOIN_S: f32 = 3.0;
+pub const TRAIL_JOIN_M: f32 = 1.5;
+
 impl TrailKeeper {
-    /// One wheel's place this frame. `now` is the clock the gaps are judged on:
-    /// a wheel unseen for a moment starts a new run rather than joining across
-    /// wherever it went in between.
+    /// One wheel's place this frame. A wheel unseen for longer than
+    /// `TRAIL_JOIN_S`, or moved further than `TRAIL_JOIN_M`, starts a new run
+    /// rather than joining across wherever it went in between.
     pub fn saw(&mut self, wheel: &str, at: Vec2, half_width: f32, ground_kpa: f32, now: f32) {
-        let broken = self.seen.get(wheel).is_none_or(|last| now - last > 0.5);
-        self.seen.insert(wheel.to_owned(), now);
+        let broken = self
+            .live
+            .get(wheel)
+            .is_none_or(|last| now - last.seen > TRAIL_JOIN_S || at.distance(last.at) > TRAIL_JOIN_M);
         // Each wheel keeps its own share of the room, so one wheel driving hard
         // cannot crowd the others' lines out of the picture. Counted before the
         // run is taken out, since taking it borrows the whole set.
@@ -256,20 +264,18 @@ impl TrailKeeper {
                 ground_kpa,
                 fade: 1.0,
             });
-        } else {
-            let Some(last) = run.last().copied() else { return };
+        } else if let Some(last) = run.last().copied() {
             let step = at.distance(last.at);
-            if step < TRAIL_STEP_M {
-                return;
+            if step >= TRAIL_STEP_M {
+                run.push(TrailPoint {
+                    at,
+                    along: last.along + step,
+                    half_width: half_width.abs(),
+                    seen: now,
+                    ground_kpa,
+                    fade: 1.0,
+                });
             }
-            run.push(TrailPoint {
-                at,
-                along: last.along + step,
-                half_width: half_width.abs(),
-                seen: now,
-                ground_kpa,
-                fade: 1.0,
-            });
         }
         // A point leaves for one reason only: it is older than `TRAIL_KEEP_S`.
         // A run whose head is cut has to say so, or the covers join it to
@@ -289,6 +295,9 @@ impl TrailKeeper {
         if run.len() > share {
             Self::thin_the_old(run);
         }
+        let along = run.last().map_or(0.0, |kept| kept.along + at.distance(kept.at));
+        let head = TrailPoint { at, along, half_width: half_width.abs(), seen: now, ground_kpa, fade: 1.0 };
+        self.live.insert(wheel.to_owned(), head);
     }
 
 /// How far the line may be allowed to move when a point is taken out of it.
@@ -335,12 +344,27 @@ fn off_the_chord(point: Vec2, before: Vec2, after: Vec2) -> f32 {
     ((point - before).perp_dot(chord) / length).abs()
 }
 
-    /// All the lines, flattened for the covers. Over `TRAIL_POINTS`, the oldest
-    /// end of whichever line is oldest goes first, so no line is ever cut off
-    /// whole and what goes is always the most faded mark.
+    /// All the lines, flattened for the covers, each drawn up to where its
+    /// wheel is now. Over `TRAIL_POINTS`, the oldest end of whichever line is
+    /// oldest goes first, so no line is ever cut off whole and what goes is
+    /// always the most faded mark.
     pub fn flattened(&self, now: f32) -> Vec<TrailPoint> {
-        let mut runs: Vec<&[TrailPoint]> =
-            self.runs.values().map(Vec::as_slice).filter(|run| !run.is_empty()).collect();
+        let lines: Vec<Vec<TrailPoint>> = self
+            .runs
+            .iter()
+            .filter(|(_, run)| !run.is_empty())
+            .map(|(wheel, run)| {
+                let mut line = run.clone();
+                if let (Some(head), Some(last)) = (self.live.get(wheel), run.last())
+                    && head.seen >= last.seen
+                    && head.at.distance(last.at) > 0.01
+                {
+                    line.push(*head);
+                }
+                line
+            })
+            .collect();
+        let mut runs: Vec<&[TrailPoint]> = lines.iter().map(Vec::as_slice).collect();
         let mut total: usize = runs.iter().map(|run| run.len()).sum();
         while total > TRAIL_POINTS {
             let oldest = (0..runs.len())
@@ -373,7 +397,7 @@ fn off_the_chord(point: Vec2, before: Vec2, after: Vec2) -> f32 {
             if let Some(first) = run.first_mut() {
                 first.half_width = -first.half_width.abs();
             }
-            !run.is_empty() && self.seen.get(wheel).is_some_and(|last| now - last <= TRAIL_KEEP_S)
+            !run.is_empty() && self.live.get(wheel).is_some_and(|last| now - last.seen <= TRAIL_KEEP_S)
         });
     }
 }
@@ -472,6 +496,23 @@ fn the_shader_holds_exactly_as_many_points_as_are_sent_to_it() {
     assert!(source.contains(&format!("hard: array<vec4<f32>, {}>", TRAIL_POINTS / 2)));
     assert!(source.contains(&format!("boxes: array<vec4<f32>, {}>", TRAIL_POINTS / TRAIL_CHUNK)));
     assert!(source.contains(&format!("const TRAIL_CHUNK: i32 = {TRAIL_CHUNK};")));
+}
+
+#[test]
+fn a_line_reaches_its_wheel_and_joins_across_a_short_pause() {
+    let mut keeper = TrailKeeper::default();
+    keeper.saw("w", Vec2::ZERO, 0.2, 100.0, 0.0);
+    keeper.saw("w", Vec2::new(0.2, 0.0), 0.2, 100.0, 0.1);
+    let line = keeper.flattened(0.1);
+    assert_eq!(line.len(), 2);
+    assert_eq!(line[1].at, Vec2::new(0.2, 0.0), "the line stops short of its wheel");
+    keeper.saw("w", Vec2::new(1.0, 0.0), 0.2, 100.0, 1.5);
+    let line = keeper.flattened(1.5);
+    assert_eq!(line.iter().filter(|point| point.half_width < 0.0).count(), 1, "a short pause broke the line");
+    assert_eq!(line.last().unwrap().at, Vec2::new(1.0, 0.0));
+    keeper.saw("w", Vec2::new(9.0, 0.0), 0.2, 100.0, 1.6);
+    let line = keeper.flattened(1.6);
+    assert_eq!(line.iter().filter(|point| point.half_width < 0.0).count(), 2, "a jump was drawn across");
 }
 
 #[test]
