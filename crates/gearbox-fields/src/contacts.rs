@@ -172,16 +172,23 @@ pub struct WheelContacts {
 /// larger number here.
 pub const TRAMPLE_CLOCK_S: f32 = 3600.0;
 
+/// Half-widths of the tyre either side of its middle that the across channel
+/// of a stamp spans: the texels laid past the tyre's edge read as past it, so
+/// the shaders cut the pressed band at the tyre's true edge. `ACROSS_SPAN` in
+/// `shaders/interaction.wesl`.
+pub const ACROSS_SPAN: f32 = 3.0;
+
 /// Encodes a stamp: time on the wrapped clock, then one channel packing the
-/// roll direction (8 bits), where across the tyre the texel lies (4 bits,
-/// -1..1) and the scrub (4 bits, never 0, so 0 means never stamped).
+/// roll direction (8 bits), where across the tyre the texel lies (4 bits, in
+/// half-widths over ±`ACROSS_SPAN`) and the scrub (4 bits, never 0, so 0
+/// means never stamped).
 pub fn trample_texel(now: f32, direction: Vec2, across: f32, scrub: f32) -> [u16; 2] {
     // Floored so a stamp never lands ahead of the shader clock: a stamp in
     // the future would read as a whole clock period old and spring back up.
     let time = ((now.rem_euclid(TRAMPLE_CLOCK_S) / TRAMPLE_CLOCK_S) * 65535.0).floor() as u16;
     let angle = (direction.y.atan2(direction.x) + std::f32::consts::PI) / std::f32::consts::TAU;
     let angle = (angle * 255.0).round() as u16 & 255;
-    let across = ((across.clamp(-1.0, 1.0) * 0.5 + 0.5) * 15.0).round() as u16;
+    let across = (((across / ACROSS_SPAN).clamp(-1.0, 1.0) * 0.5 + 0.5) * 15.0).round() as u16;
     let scrub = ((scrub.clamp(0.0, 1.0) * 15.0).round() as u16).max(1);
     [time, angle << 8 | across << 4 | scrub]
 }

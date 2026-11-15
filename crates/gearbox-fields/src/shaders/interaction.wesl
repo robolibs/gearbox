@@ -32,6 +32,20 @@ fn wheel_texel(tex: texture_2d<u32>, index: vec2<i32>, recovery: f32) -> vec3<f3
 // Nothing can outlast the stamp clock itself, which spans an hour.
 const SCAR_SECONDS: f32 = 720.0;
 
+// Half-widths either side of a tyre's middle the across channel spans,
+// `ACROSS_SPAN` in `contacts.rs`, and the share of the half-width over which
+// the pressed band fades out at the tyre's edge.
+const ACROSS_SPAN: f32 = 3.0;
+const EDGE_FADE: f32 = 0.15;
+
+// Where across the tyre a texel lies, in half-widths, and whether it was
+// stamped at all.
+fn wheel_across(tex: texture_2d<u32>, index: vec2<i32>) -> vec2<f32> {
+    let texel = textureLoad(tex, index, 0);
+    if (texel.g == 0u) { return vec2<f32>(0.0); }
+    return vec2<f32>((f32((texel.g >> 4u) & 15u) / 15.0 * 2.0 - 1.0) * ACROSS_SPAN, 1.0);
+}
+
 fn sample_wheels_over(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec2<f32>,
                       recovery: f32) -> vec3<f32> {
     let t = (world_xz - params.origin) * params.texels_per_metre;
@@ -43,7 +57,19 @@ fn sample_wheels_over(tex: texture_2d<u32>, params: WheelMapParams, world_xz: ve
     let b = wheel_texel(tex, i + vec2<i32>(1, 0), recovery);
     let c = wheel_texel(tex, i + vec2<i32>(0, 1), recovery);
     let d = wheel_texel(tex, i + vec2<i32>(1, 1), recovery);
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    // The stamp is laid a texel past the tyre on each side, so the grid never
+    // steps the band's edge; the band is cut where the across offset, smooth
+    // over the stamped texels round this point, passes the tyre's half width.
+    let w = vec4<f32>((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
+    let wa = wheel_across(tex, i);
+    let wb = wheel_across(tex, i + vec2<i32>(1, 0));
+    let wc = wheel_across(tex, i + vec2<i32>(0, 1));
+    let wd = wheel_across(tex, i + vec2<i32>(1, 1));
+    let stamped = w * vec4<f32>(wa.y, wb.y, wc.y, wd.y);
+    let weight = stamped.x + stamped.y + stamped.z + stamped.w;
+    let across = dot(stamped, vec4<f32>(wa.x, wb.x, wc.x, wd.x)) / max(weight, 1e-6);
+    let within = 1.0 - smoothstep(1.0 - EDGE_FADE, 1.0, abs(across));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y) * within;
 }
 
 fn sample_wheels(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec2<f32>) -> vec3<f32> {
