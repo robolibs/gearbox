@@ -393,6 +393,11 @@ class Lab:
         self.markers.clear()
 
 
+# Colour of the predicted motion of obstacles, and the estimated speed, m/s,
+# below which an obstacle's prediction is not drawn.
+PREDICTION_COLOR = "#ffb000"
+PREDICTION_SHOWN_MPS = 0.15
+
 class Scene:
     """One run drawn in the viewer, in the robot's odom frame: the path as a
     flowing ribbon, the goal as a beacon, the driven trace, the controller's
@@ -424,7 +429,7 @@ class Scene:
         for i, (x, y, r) in enumerate(statics):
             d.shapes("lab/obstacle", f"static_{i}", "ellipsoid", [(x, y, 0.0)], sizes=[(2 * r, 2 * r, 1.2 * r)], frame=f)
 
-    def tick(self, st, tracker, cmd, moving, clearance):
+    def tick(self, st, tracker, cmd, moving, clearance, predictions=()):
         self.ticks += 1
         if not self.enabled or self.ticks % 4 or self.d.backlog() > SCENE_BACKLOG:
             return
@@ -450,11 +455,24 @@ class Scene:
         for i, (x, y, vx, vy, r) in enumerate(moving):
             d.shapes("lab/obstacle", f"moving_{i}", "ellipsoid", [(x, y, 0.0)], sizes=[(2 * r, 2 * r, r)],
                      frame=f, lifetime=1.0, urgency=urgency)
-            times = [0.5 * k for k in range(1, 8)]
-            centers = [(x + vx * t, y + vy * t, 0.03) for t in times]
-            sizes = [(2 * (r + 2 * (0.05 + 0.1 * t)),) * 2 for t in times]
-            d.shapes("lab/obstacle", f"moving_{i}_prediction", "ellipse", centers, sizes=sizes, fill="both",
-                     frame=f, lifetime=1.0, urgency=urgency)
+        # What the controllers see of each obstacle that moves: an arrow along
+        # its estimated velocity, its predicted path, and its spread a second
+        # apart along it.
+        for oid, r, dt, pts in predictions:
+            if len(pts) < 2 or dt <= 0:
+                continue
+            (x0, y0, _), (x1, y1, _) = pts[0], pts[1]
+            speed = math.hypot(x1 - x0, y1 - y0) / dt
+            if speed < PREDICTION_SHOWN_MPS:
+                continue
+            d.arrows("lab/obstacle", f"track_{oid}_velocity", poses=[(x0, y0, 0.5 * r + 0.2, math.atan2(y1 - y0, x1 - x0))],
+                     length=max(0.5, speed * 1.5), color=PREDICTION_COLOR, frame=f, lifetime=1.0)
+            d.lines("lab/obstacle", f"track_{oid}_path", [(x, y, 0.05) for x, y, _ in pts], color=PREDICTION_COLOR,
+                    dashed=True, frame=f, lifetime=1.0)
+            every = max(1, round(1.0 / dt))
+            ahead = pts[every::every]
+            d.shapes("lab/obstacle", f"track_{oid}_spread", "ellipse", [(x, y, 0.03) for x, y, _ in ahead],
+                     sizes=[(2 * (r + 2 * s),) * 2 for _, _, s in ahead], fill="both", frame=f, lifetime=1.0, urgency=urgency)
         if self.ticks % 12 == 0:
             d.text("lab/robot", "status", [(0.0, 0.0, m.length + 1.0)],
                    text=f"{self.label}   v {cmd.linear_velocity:+.2f}  ω {cmd.angular_velocity:+.2f}", frame=self.BODY,
@@ -704,7 +722,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
         if verbose and len(log) % 20 == 0:
             print(f"  t={now - t0:5.1f} err={err:5.2f} v={v:+.2f} vx={st.vx:+.2f} w={w:+.2f} "
                   f"near={now_clear:5.2f} min={min_clear:5.2f} {cmd.status_message}", flush=True)
-        scene.tick(st, t, cmd, [o for o in obs_now if o[2] or o[3]], now_clear)
+        scene.tick(st, t, cmd, [o for o in obs_now if o[2] or o[3]], now_clear, world.predictions())
         marks.append(("scene", time.time()))
         slow = [(name, at - before) for (_, before), (name, at) in zip([("start", wall)] + marks, marks) if at - before > SLOW_CALL_S]
         stalled += sum(s for _, s in slow)
