@@ -133,8 +133,140 @@ def _arc(cx, cy, r, a0, a1, n):
     return [(cx + r * math.cos(a0 + (a1 - a0) * i / n), cy + r * math.sin(a0 + (a1 - a0) * i / n)) for i in range(n + 1)]
 
 
-def scenario(name: str, s: float) -> Scenario:
-    """Scenario `name` scaled by `s` (1 for a ~1 m robot)."""
+# Metres a three-point-turn street leaves either side of the body it sweeps.
+STREET_ROOM_M = 1.0
+
+
+def three_point(radius: float, step: float) -> tuple[list[tuple[float, float, float]], list[float]]:
+    """A three-point turn from the origin heading +x, on arcs of `radius`:
+    forward left 70°, reversing right 40°, forward left 70°, ending heading
+    −x. Poses `step` apart with the sign of their direction of travel."""
+    pts, signs = [(0.0, 0.0, 0.0)], [1.0]
+    x, y, psi = pts[0]
+    for degrees, sign in ((70.0, 1.0), (40.0, -1.0), (70.0, 1.0)):
+        n = max(2, int(math.radians(degrees) * radius / step))
+        side = 1.0 if sign > 0 else -1.0
+        cx, cy = x - side * radius * math.sin(psi), y + side * radius * math.cos(psi)
+        for i in range(1, n + 1):
+            a = psi + math.radians(degrees) * i / n
+            pts.append((cx + side * radius * math.sin(a), cy - side * radius * math.cos(a), a))
+            signs.append(sign)
+        x, y, psi = pts[-1]
+    return pts, signs
+
+
+def swept_y(poses, m: "Machine") -> tuple[float, float]:
+    """Lowest and highest y the body of `m` reaches over `poses`."""
+    ys = [y + math.sin(a) * dx + math.cos(a) * dy
+          for x, y, a in poses
+          for dx in (m.body_offset + m.length / 2, m.body_offset - m.length / 2)
+          for dy in (m.width / 2, -m.width / 2)]
+    return min(ys), max(ys)
+
+
+def street(lo: float, hi: float, x0: float, x1: float, r: float, spacing: float) -> list[tuple[float, float, float]]:
+    """Posts of radius `r` `spacing` apart along y = `lo` and y = `hi` from x0 to x1."""
+    n = max(1, math.ceil((x1 - x0) / spacing))
+    return [(x0 + (x1 - x0) * i / n, y, r) for i in range(n + 1) for y in (lo - r, hi + r)]
+
+
+def rounded(corners: list[tuple[float, float]], radius: float, n: int = 8) -> list[tuple[float, float]]:
+    """The polyline through `corners` with each inner corner filleted by an
+    arc of `radius`, `n` points along it."""
+    out = [corners[0]]
+    for (ax, ay), (bx, by), (cx, cy) in zip(corners, corners[1:], corners[2:]):
+        h1, h2 = math.atan2(by - ay, bx - ax), math.atan2(cy - by, cx - bx)
+        turn = wrap(h2 - h1)
+        if abs(turn) < 1e-6:
+            out.append((bx, by))
+            continue
+        cut = radius * math.tan(abs(turn) / 2)
+        px, py = bx - cut * math.cos(h1), by - cut * math.sin(h1)
+        side = 1.0 if turn > 0 else -1.0
+        ox, oy = px - side * radius * math.sin(h1), py + side * radius * math.cos(h1)
+        for i in range(n + 1):
+            h = h1 + turn * i / n
+            out.append((ox + side * radius * math.sin(h), oy - side * radius * math.cos(h)))
+    out.append(corners[-1])
+    return out
+
+
+def turning_radius(m: "Machine | None", s: float) -> float:
+    """Tightest turn of an Ackermann `m`, or `s` without one."""
+    if m is not None and m.steering == "ackermann" and m.max_steer > 0:
+        return m.wheelbase / math.tan(m.max_steer)
+    return s
+
+
+def scenario(name: str, s: float, m: "Machine | None" = None) -> Scenario:
+    """Scenario `name` scaled by `s` (1 for a ~1 m robot); the reversing
+    ones are sized from `m`'s turning radius and body."""
+    if name in ("k_turn", "hairpin"):
+        # A street too narrow to turn round in keeping `STREET_ROOM_M` off its
+        # sides, wide enough for a three-point turn on arcs 1.1 times the
+        # tightest with that room: the path is that turn (`k_turn`) or a
+        # U-turn tighter than any the machine can make forward (`hairpin`).
+        machine = m or Machine("", "ackermann", 1.0, 1.0, 1.0, width=0.5 * s, length=0.8 * s)
+        radius = turning_radius(m, s)
+        turn, signs = three_point(1.1 * radius, 0.1 * s)
+        lo, hi = swept_y(turn, machine)
+        room = STREET_ROOM_M
+        run_in = 8.0 * s
+        x_turn = run_in
+        poses = [(x_turn + x, y, a) for x, y, a in turn]
+        x_end, y_end = poses[-1][0], poses[-1][1]
+        before = [(x * s, 0.0) for x in [i * 0.5 for i in range(int(run_in / s / 0.5))]]
+        after = [(x_end - k * 0.5 * s, y_end) for k in range(1, 17)]
+        if name == "k_turn":
+            pts = before + [(x, y) for x, y, _ in poses] + after
+            speeds = [1.0] * len(before) + signs + [1.0] * len(after)
+        else:
+            r = 0.5 * y_end
+            arc = _arc(x_turn, r, r, -math.pi / 2, math.pi / 2, 24)
+            pts = before + arc + after
+            speeds = []
+        posts = street(lo - room, hi + room, -2.0 * s, x_turn + 1.5 * radius + machine.length, 0.15 * s, 0.9 * s)
+        return Scenario(name, pts, speeds=speeds, reverse=True, static=posts, lost=4.0 * s, time_limit=60.0 * s)
+    if name == "bumps":
+        # 300 m weaving east over rolling ground, laid for
+        # `ONDRIVE_LAB_AREA=-150,-200` with `ONDRIVE_LAB_FIELDS` sinking lanes
+        # across it every 12 m: posts on the line and two crossers.
+        sway = lambda u: 3.0 * math.sin(2 * math.pi * u / 60.0)  # noqa: E731
+        pts = [(float(u), sway(u)) for u in range(0, 301)]
+        posts = [(u, sway(u) + dy, 0.5) for u, dy in ((70, 0.1), (140, -0.15), (210, 0.1), (262, -0.1))]
+        return Scenario(name, pts, static=posts, lost=6.0 * s,
+                        movers=[_mover((100.0, -12.0, math.pi / 2), 0.7, (100.0, sway(100))),
+                                _mover((230.0, 12.0, -math.pi / 2), 0.6, (230.0, sway(230)))])
+    if name == "hill_course":
+        # 310 m stepping east over the hill north 560 to 600, east 1860 on:
+        # up the slope, across it and down it in turn, corners rounded, laid
+        # for `ONDRIVE_LAB_AREA=600,1860`; posts on it and two crossers.
+        legs = [(30, 0), (0, -40), (30, 0), (0, 40), (30, 0), (0, -40), (30, 0), (0, 40), (30, 0)]
+        corners = [(0.0, 0.0)]
+        for dx, dy in legs:
+            corners.append((corners[-1][0] + dx, corners[-1][1] + dy))
+        pts = densify(rounded(corners, 5.0), 0.5)
+        posts = [(30.0 + 0.1, -20.0, 0.5), (75.0, 0.15, 0.5), (120.0 - 0.1, -20.0, 0.5), (140.0, -0.1, 0.5)]
+        return Scenario(name, pts, static=posts, lost=6.0 * s,
+                        movers=[_mover((45.0, -52.0, math.pi / 2), 0.6, (45.0, -40.0)),
+                                _mover((105.0, -28.0, -math.pi / 2), 0.6, (105.0, -40.0))])
+    if name == "cusp_posts":
+        sc = scenario("cusp", s)
+        body = (m.length if m else 0.8 * s)
+        sc.name = name
+        sc.static = [(8 * s + 0.5 * body + 0.9 * s, 0.0, 0.25 * s), (7 * s, 2.0 * s, 0.25 * s),
+                     (5.4 * s, -0.9 * s, 0.25 * s), (5 * s, 3 * s + 0.5 * body + 1.0 * s, 0.25 * s)]
+        return sc
+    if name == "bay":
+        # Reverse into a bay open on its low side: posts either side of the
+        # goal and behind it, `STREET_ROOM_M` less a quarter off the body.
+        width, body = (m.width, m.length) if m else (0.5 * s, 0.8 * s)
+        gx, gy = 6 * s, 3 * s
+        r, room = 0.2 * s, 0.75 * STREET_ROOM_M
+        side = 0.5 * width + room + r
+        posts = [(gx + dx, gy + dy, r) for dx in (-side, side) for dy in (-0.3 * body, 0.3 * body)]
+        posts.append((gx, gy + 0.5 * body + room + r, r))
+        return Scenario(name, [(0, 0), (gx, 0)], goal=(gx, gy, -math.pi / 2), reverse=True, static=posts, time_limit=40.0 * s)
     if name == "line":
         return Scenario(name, [(0, 0), (20 * s, 0)])
     if name == "s_curve":
@@ -165,6 +297,12 @@ def scenario(name: str, s: float) -> Scenario:
                         static=[(8 * s, 0.4 * s, 0.5 * s), (15 * s, -0.4 * s, 0.5 * s), (22 * s, 0.4 * s, 0.5 * s)])
     if name == "overtake":
         return Scenario(name, [(0, 0), (40 * s, 0)], movers=[_mover((6 * s, 0.1 * s, 0.0), 0.3)])
+    if name == "matched":
+        # A mover setting off ahead and to the left, crossing the path
+        # slantwise the way the robot goes at about its speed: racing it
+        # across never ends, passing behind it does.
+        heading = -math.radians(25.0)
+        return Scenario(name, [(0, 0), (40 * s, 0)], movers=[_mover((5 * s, 3 * s, heading), 0.9)])
     if name == "crossing_both":
         return Scenario(name, [(0, 0), (36 * s, 0)],
                         movers=[_mover((12 * s, -9 * s, math.pi / 2), 0.7, (12 * s, 0.0)),
@@ -207,9 +345,34 @@ def _mover(start, speed, meet=None) -> dict:
     return {"start": start, "speed": speed, "meet": meet}
 
 
+def turned(sc: Scenario, degrees: float) -> Scenario:
+    """`sc` turned `degrees` anticlockwise about its start: path, posts,
+    movers and goal."""
+    if not degrees:
+        return sc
+    a = math.radians(degrees)
+    c, s = math.cos(a), math.sin(a)
+    x0, y0 = sc.points[0]
+    turn = lambda x, y: (x0 + c * (x - x0) - s * (y - y0), y0 + s * (x - x0) + c * (y - y0))  # noqa: E731
+    movers = [{**mv, "start": (*turn(*mv["start"][:2]), wrap(mv["start"][2] + a)),
+               "meet": turn(*mv["meet"]) if mv.get("meet") is not None else None} for mv in sc.movers]
+    goal = (*turn(*sc.goal[:2]), wrap(sc.goal[2] + a)) if sc.goal else None
+    return Scenario(sc.name, [turn(x, y) for x, y in sc.points], speeds=list(sc.speeds), closed=sc.closed,
+                    reverse=sc.reverse, goal=goal, static=[(*turn(x, y), r) for x, y, r in sc.static],
+                    movers=movers, laps=sc.laps, time_limit=sc.time_limit, lost=sc.lost)
+
+
+def chosen_area() -> tuple[float, float] | None:
+    """The area `ONDRIVE_LAB_AREA` (`north,east` metres) names, if set."""
+    text = os.environ.get("ONDRIVE_LAB_AREA")
+    return tuple(float(v) for v in text.split(",")) if text else None
+
+
 SCENARIOS = ["line", "s_curve", "corners", "u_turn", "cusp", "loop", "park", "static_obstacle", "crossing", "head_on",
-             "slalom", "overtake", "crossing_both", "mixed", "crowd"]
-OBSTACLE_SCENARIOS = ["static_obstacle", "crossing", "head_on", "slalom", "overtake", "crossing_both", "mixed", "crowd"]
+             "slalom", "overtake", "crossing_both", "mixed", "crowd", "k_turn", "hairpin", "cusp_posts", "bay",
+             "bumps", "hill_course", "matched"]
+OBSTACLE_SCENARIOS = ["static_obstacle", "crossing", "head_on", "slalom", "overtake", "crossing_both", "mixed", "crowd",
+                      "k_turn", "hairpin", "cusp_posts", "bay", "bumps", "hill_course", "matched"]
 
 
 # ─── geometry ────────────────────────────────────────────────────────
@@ -397,6 +560,10 @@ class Lab:
 # below which an obstacle's prediction is not drawn.
 PREDICTION_COLOR = "#ffb000"
 PREDICTION_SHOWN_MPS = 0.15
+# Colour of the rollouts that would touch an obstacle, and whether to leave
+# them out (`ONDRIVE_LAB_HIDE_BLOCKED=1`).
+BLOCKED_COLOR = "#8a1c1c"
+HIDE_BLOCKED = os.environ.get("ONDRIVE_LAB_HIDE_BLOCKED", "0") == "1"
 
 class Scene:
     """One run drawn in the viewer, in the robot's odom frame: the path as a
@@ -417,6 +584,7 @@ class Scene:
         self.m = m
         self.label = label
         self.ticks = 0
+        self.step = None
 
     def setup(self, path_pts, goal, statics, v_nom):
         if not self.enabled:
@@ -440,10 +608,24 @@ class Scene:
             d.lines("lab/robot", "horizon", [(p[0], p[1], 0.15) for p in plan], frame=f, lifetime=1.0)
         frame = tracker.debug_frame()
         if frame["rollouts"]:
-            lo, hi = min(frame["costs"]), max(frame["costs"])
-            cheap = [1.0 - (c - lo) / (hi - lo + 1e-9) for c in frame["costs"]]
-            d.lines("lab/robot/rollouts", "samples", strips=[[(x, y, 0.08) for x, y in r] for r in frame["rollouts"]],
-                    values=cheap, colormap="rdylgn", color="#ffffff", alpha=0.45, frame=f, lifetime=1.0)
+            # Rollouts the body would touch an obstacle along, at each
+            # point's time, faint and red; the rest tinted by cost.
+            step = self.rollout_step(tracker)
+            hit = [self.blocked(r, step, predictions) for r in frame["rollouts"]]
+            clear = [(r, c) for r, c, h in zip(frame["rollouts"], frame["costs"], hit) if not h]
+            if clear:
+                lo, hi = min(c for _, c in clear), max(c for _, c in clear)
+                cheap = [1.0 - (c - lo) / (hi - lo + 1e-9) for _, c in clear]
+                d.lines("lab/robot/rollouts", "samples", strips=[[(x, y, 0.08) for x, y in r] for r, _ in clear],
+                        values=cheap, colormap="rdylgn", color="#ffffff", alpha=0.45, frame=f, lifetime=1.0)
+            else:
+                d.delete("lab/robot/rollouts", "samples")
+            blocked = [r for r, h in zip(frame["rollouts"], hit) if h]
+            if blocked and not HIDE_BLOCKED:
+                d.lines("lab/robot/rollouts", "blocked", strips=[[(x, y, 0.07) for x, y in r] for r in blocked],
+                        color=BLOCKED_COLOR, alpha=0.18, width=-1.0, frame=f, lifetime=1.0)
+            else:
+                d.delete("lab/robot/rollouts", "blocked")
         if frame["guides"]:
             d.lines("lab/robot", "detours", strips=[[(x, y, 0.06) for x, y in g] for g in frame["guides"]],
                     dashed=True, frame=f, lifetime=1.0)
@@ -477,6 +659,35 @@ class Scene:
             d.text("lab/robot", "status", [(0.0, 0.0, m.length + 1.0)],
                    text=f"{self.label}   v {cmd.linear_velocity:+.2f}  ω {cmd.angular_velocity:+.2f}", frame=self.BODY,
                    lifetime=2.0)
+
+    def rollout_step(self, tracker) -> float:
+        """Seconds between the points of the controller's rollouts."""
+        if self.step is None:
+            params = tracker.params()
+            self.step = float(params.get("dt", 0.1)) if isinstance(params, dict) else 0.1
+        return self.step
+
+    def blocked(self, rollout, step: float, predictions) -> bool:
+        """Whether the body driven along `rollout`, a point every `step`
+        seconds, would touch an obstacle where it is predicted then."""
+        if len(rollout) < 2:
+            return False
+        m = self.m
+        reach = 0.5 * math.hypot(m.length, m.width) + abs(m.body_offset)
+        xs, ys = [p[0] for p in rollout], [p[1] for p in rollout]
+        x0, x1, y0, y1 = min(xs) - reach, max(xs) + reach, min(ys) - reach, max(ys) + reach
+        near = [(r, dt, pts) for _, r, dt, pts in predictions
+                if pts and dt > 0 and any(x0 - r <= x <= x1 + r and y0 - r <= y <= y1 + r for x, y, _ in pts)]
+        for k in range(1, len(rollout)):
+            (ax, ay), (bx, by) = rollout[k - 1][:2], rollout[k][:2]
+            if ax == bx and ay == by:
+                continue
+            yaw = math.atan2(by - ay, bx - ax)
+            for r, dt, pts in near:
+                ox, oy, _ = pts[min(len(pts) - 1, round(k * step / dt))]
+                if box_clearance(bx, by, yaw, m.length, m.width, ox, oy, r, m.body_offset) < 0.0:
+                    return True
+        return False
 
     def finish(self, st, status: str):
         if not self.enabled:
@@ -601,11 +812,14 @@ class SimClock:
 
 def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: bool) -> dict:
     m = MACHINES[mname]
-    sc = scenario(sname, m.scale)
+    sc = turned(scenario(sname, m.scale, m), float(os.environ.get("ONDRIVE_LAB_TURN", "0")))
     lab.fresh()
     yaw0 = start_heading(sc)
     for _ in range(SPAWN_TRIES):
-        lab.origin = next_area()
+        lab.origin = chosen_area() or next_area()
+        fields = os.environ.get("ONDRIVE_LAB_FIELDS")
+        if fields:
+            lab.gb.set_fields(json.loads(Path(fields).read_text()))
         lab.clear()
         robot = lab.spawn("robot", m, 0.0, 0.0, yaw0)
         s0 = robot.state(wait=1.0)
@@ -718,10 +932,12 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
         log.append([round(now - t0, 3), round(st.x - ox, 3), round(st.y - oy, 3), round(st.heading_rad, 3),
                     round(st.vx, 3), round(st.wz, 3), round(v, 3), round(w, 3), round(err, 3), cmd.valid,
                     round(now_clear, 3) if near else None,
-                    [round(near[0] - ox, 2), round(near[1] - oy, 2)] if near else None, round(st.vy, 3)])
+                    [round(near[0] - ox, 2), round(near[1] - oy, 2)] if near else None, round(st.vy, 3),
+                    round(st.z, 3), round(st.roll_rad, 4), round(st.pitch_rad, 4)])
         if verbose and len(log) % 20 == 0:
             print(f"  t={now - t0:5.1f} err={err:5.2f} v={v:+.2f} vx={st.vx:+.2f} w={w:+.2f} "
-                  f"near={now_clear:5.2f} min={min_clear:5.2f} {cmd.status_message}", flush=True)
+                  f"near={now_clear:5.2f} min={min_clear:5.2f} roll={math.degrees(st.roll_rad):+4.1f} "
+                  f"pitch={math.degrees(st.pitch_rad):+4.1f} {cmd.status_message}", flush=True)
         scene.tick(st, t, cmd, [o for o in obs_now if o[2] or o[3]], now_clear, world.predictions())
         marks.append(("scene", time.time()))
         slow = [(name, at - before) for (_, before), (name, at) in zip([("start", wall)] + marks, marks) if at - before > SLOW_CALL_S]

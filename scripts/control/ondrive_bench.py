@@ -70,7 +70,7 @@ class Plant:
 
 def run(mname: str, kind: str, sname: str, verbose: bool, params: dict | None = None) -> dict:
     m = MACHINES[mname]
-    sc = scenario(sname, m.scale)
+    sc = scenario(sname, m.scale, m)
     pts = list(sc.points)
     path = ondrive.Path(is_closed=sc.closed)
     for i, (x, y) in enumerate(pts):
