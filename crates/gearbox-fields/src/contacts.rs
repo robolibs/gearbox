@@ -241,6 +241,9 @@ pub struct TrailKeeper {
 pub const TRAIL_JOIN_S: f32 = 3.0;
 pub const TRAIL_JOIN_M: f32 = 1.5;
 
+/// Seconds over which a wheel's load is eased along its line.
+pub const TRAIL_LOAD_EASE_S: f32 = 1.5;
+
 impl TrailKeeper {
     /// One wheel's place this frame. A wheel unseen for longer than
     /// `TRAIL_JOIN_S`, or moved further than `TRAIL_JOIN_M`, starts a new run
@@ -250,6 +253,12 @@ impl TrailKeeper {
             .live
             .get(wheel)
             .is_none_or(|last| now - last.seen > TRAIL_JOIN_S || at.distance(last.at) > TRAIL_JOIN_M);
+        // The load is eased along the line, so a wheel landing off a bump or
+        // riding just clear of the ground for a frame digs no pit and skips
+        // no rut.
+        let ground_kpa = self.live.get(wheel).map_or(ground_kpa, |last| {
+            last.ground_kpa + (ground_kpa - last.ground_kpa) * ((now - last.seen) / TRAIL_LOAD_EASE_S).clamp(0.0, 1.0)
+        });
         // Each wheel keeps its own share of the room, so one wheel driving hard
         // cannot crowd the others' lines out of the picture. Counted before the
         // run is taken out, since taking it borrows the whole set.
@@ -513,6 +522,19 @@ fn a_line_reaches_its_wheel_and_joins_across_a_short_pause() {
     keeper.saw("w", Vec2::new(9.0, 0.0), 0.2, 100.0, 1.6);
     let line = keeper.flattened(1.6);
     assert_eq!(line.iter().filter(|point| point.half_width < 0.0).count(), 2, "a jump was drawn across");
+}
+
+#[test]
+fn a_landing_spike_in_the_load_digs_no_pit() {
+    let mut keeper = TrailKeeper::default();
+    let mut now = 0.0;
+    for step in 0..200 {
+        let spike = if step == 120 { 800.0 } else { 100.0 };
+        keeper.saw("w", Vec2::new(step as f32 * 0.05, 0.0), 0.2, spike, now);
+        now += 1.0 / 30.0;
+    }
+    let deepest = keeper.flattened(now).iter().map(|point| point.ground_kpa).fold(0.0, f32::max);
+    assert!(deepest < 130.0, "one frame's spike dug to {deepest} kPa");
 }
 
 #[test]
