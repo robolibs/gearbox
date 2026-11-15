@@ -2609,25 +2609,27 @@ fn record_wheel_tracks(
                 continue;
             }
             let p = DVec3::new(p[0], p[1], p[2]);
-            let ground = crate::world::terrain_height_m(p.x as f32, p.z as f32);
             if let Some(output) = tyre {
                 values.set(&machine.id, &link.name, "normal_force", output.normal_force);
                 values.set(&machine.id, &link.name, "slip_angle", output.slip_angle);
             }
-            // A tyre presses the sward while its lowest point is within the
-            // slack of the ground, touching it or bounced just off it.
-            let contact_point = match tyre {
-                Some(output) if output.in_contact => Vec3::new(
-                    (output.contact_point.x - gearbox_globe::physics_offset(site).x) as f32,
-                    output.contact_point.y as f32,
-                    output.contact_point.z as f32,
-                ),
-                _ if p.y as f32 - radius as f32 <= ground + WHEEL_TRACK_CONTACT_SLACK_M => {
-                    Vec3::new(p.x as f32, ground, p.z as f32)
-                }
-                _ => continue,
-            };
             let axle_world = body.rotation() * axle_local;
+            // Where the tyre meets the terrain: the point of its rim nearest
+            // the ground under it, which on a slope lies beside the hub. It
+            // presses the sward while that point is within the slack of the
+            // ground, touching or bounced just off it.
+            let hub = Vec3::new(p.x as f32, p.y as f32, p.z as f32);
+            let axle_dir = Vec3::new(axle_world.x as f32, axle_world.y as f32, axle_world.z as f32).normalize_or(Vec3::X);
+            let slope = terrain_normal(hub.x, hub.z);
+            let down = (axle_dir * axle_dir.dot(slope) - slope).normalize_or(Vec3::NEG_Y);
+            let rim = hub + down * radius as f32;
+            let ground = crate::world::terrain_height_m(rim.x, rim.z);
+            if rim.y > ground + WHEEL_TRACK_CONTACT_SLACK_M {
+                continue;
+            }
+            let contact_point = Vec3::new(rim.x, ground, rim.z);
+            // The tyre's width as it lies on the ground, seen from above.
+            let laid_width = width as f32 * Vec2::new(axle_dir.x, axle_dir.z).length();
             let axle = Vec2::new(axle_world.x as f32, axle_world.z as f32).normalize_or(Vec2::X);
             let mut roll = axle.perp();
             let velocity = Vec2::new(body.linvel().x as f32, body.linvel().z as f32);
@@ -2643,7 +2645,7 @@ fn record_wheel_tracks(
             // two advance by the same amount. Integrated from a speed it drifts
             // a few millimetres a frame, which is a whole lug pitch every few
             // seconds, and the print slides along the track as it is laid.
-            let here = Vec2::new(p.x as f32, p.z as f32);
+            let here = Vec2::new(rim.x, rim.z);
             let (travelled, anchor) = {
                 let rolled = machine_odometers
                     .entry(machine.id.to_string())
@@ -2680,7 +2682,7 @@ fn record_wheel_tracks(
             contacts.contacts.push(gearbox_fields::WheelContact {
                 position: contact_point,
                 direction: roll,
-                width: width as f32,
+                width: laid_width,
                 length: tyre.and_then(|out| out.pressure).map(|p| p.patch_length as f32),
                 ground_kpa: ground_kpa(tyre.as_ref()),
                 scrub: scrub.clamp(0.0, 1.0),
@@ -2695,6 +2697,18 @@ fn record_wheel_tracks(
 
 /// A wheel counts as on the ground while its lowest point is this close.
 const WHEEL_TRACK_CONTACT_SLACK_M: f32 = 0.08;
+
+/// Up from the terrain at `(x, z)`, from its heights a short step either side.
+fn terrain_normal(x: f32, z: f32) -> Vec3 {
+    const STEP_M: f32 = 0.3;
+    let height = crate::world::terrain_height_m;
+    Vec3::new(
+        height(x - STEP_M, z) - height(x + STEP_M, z),
+        2.0 * STEP_M,
+        height(x, z - STEP_M) - height(x, z + STEP_M),
+    )
+    .normalize_or(Vec3::Y)
+}
 
 /// The tyre's axle in the wheel body's frame, its width and its radius. A
 /// cylinder collider gives them directly, so a roller wider than it is tall
