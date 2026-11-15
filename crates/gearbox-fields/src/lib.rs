@@ -85,6 +85,7 @@ impl Plugin for FieldsPlugin {
         bevy::shader::load_shader_library!(app, "shaders/surface_detail.wesl");
         bevy::shader::load_shader_library!(app, "shaders/wind.wesl");
         bevy::shader::load_shader_library!(app, "shaders/canopy.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/ground.wesl");
         app.insert_resource(self.layout.clone())
             .init_resource::<profile::FieldProfiles>()
             .init_resource::<render::RenderFields>()

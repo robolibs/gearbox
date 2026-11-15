@@ -4,6 +4,7 @@ import bevy_pbr::render::{
     pbr_types::{pbr_input_new, STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT},
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing, calculate_view},
 };
+import gearbox_fields::shaders::ground::{ground_at};
 import gearbox_fields::shaders::interaction::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll};
 import gearbox_fields::shaders::canopy::{canopy_vertex, canopy_alpha, CANOPY_NEAR_M};
 import gearbox_fields::shaders::wind::{plant_lean};
@@ -116,17 +117,9 @@ fn hash11(p: f32) -> f32 {
     return rand(bitcast<u32>(p), 7u);
 }
 
-// Bilinear read of (height, normal.x, normal.z) at a world XZ position.
+// (height, normal.x, normal.z) of the drawn ground at a world XZ position.
 fn sample_field(world_xz: vec2<f32>) -> vec3<f32> {
-    let t = (world_xz - field.origin) * field.texels_per_metre;
-    let max_index = i32(field.texel_count) - 1;
-    let i = clamp(vec2<i32>(floor(t)), vec2<i32>(0), vec2<i32>(max_index - 1));
-    let f = clamp(t - vec2<f32>(i), vec2<f32>(0.0), vec2<f32>(1.0));
-    let s00 = textureLoad(heightmap, i, 0).xyz;
-    let s10 = textureLoad(heightmap, i + vec2<i32>(1, 0), 0).xyz;
-    let s01 = textureLoad(heightmap, i + vec2<i32>(0, 1), 0).xyz;
-    let s11 = textureLoad(heightmap, i + vec2<i32>(1, 1), 0).xyz;
-    return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
+    return ground_at(heightmap, field.origin, field.texels_per_metre, field.texel_count, world_xz);
 }
 
 fn blade_fade_end(rank: f32) -> f32 {
