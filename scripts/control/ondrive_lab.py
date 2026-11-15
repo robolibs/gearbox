@@ -938,7 +938,9 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
         if verbose and len(log) % 20 == 0:
             print(f"  t={now - t0:5.1f} err={err:5.2f} v={v:+.2f} vx={st.vx:+.2f} w={w:+.2f} "
                   f"near={now_clear:5.2f} min={min_clear:5.2f} roll={math.degrees(st.roll_rad):+4.1f} "
-                  f"pitch={math.degrees(st.pitch_rad):+4.1f} {cmd.status_message}", flush=True)
+                  f"pitch={math.degrees(st.pitch_rad):+4.1f} {cmd.status_message}"
+                  + (f" {t.get_status()} at=({st.x - ox:.2f},{st.y - oy:.2f}) hdg={math.degrees(st.heading_rad):.1f}"
+                     if os.environ.get("ONDRIVE_LAB_STATUS") == "1" else ""), flush=True)
         scene.tick(st, t, cmd, [o for o in obs_now if o[2] or o[3]], now_clear, world.predictions())
         marks.append(("scene", time.time()))
         slow = [(name, at - before) for (_, before), (name, at) in zip([("start", wall)] + marks, marks) if at - before > SLOW_CALL_S]

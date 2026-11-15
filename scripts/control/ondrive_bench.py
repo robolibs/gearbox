@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -35,6 +36,16 @@ YAW_GAIN = 1.0
 # axle's, as on a slope or low-grip soil.
 SLIP_REAR = 0.0
 SLIP_FRONT = 0.0
+# Steering slows as the machine stops, as gearbox steers it: lock to lock takes
+# `STEER_STILL` times longer standing than rolling at `STEER_FREE_MPS`. The
+# measured `steer_rate` was taken rolling at `STEER_MEASURED_MPS`.
+STEER_STILL = 2.4
+STEER_FREE_MPS = 1.5
+STEER_MEASURED_MPS = 1.0
+# Commands slower than this, m/s, leave a standing machine standing and bring a
+# rolling one to rest, as gearbox's drives do on grass; `ONDRIVE_BENCH_DEADBAND`
+# overrides it.
+DEADBAND = float(os.environ.get("ONDRIVE_BENCH_DEADBAND", "0.045"))
 
 
 class Plant:
@@ -49,13 +60,16 @@ class Plant:
     def step(self, v_cmd, w_cmd, dt):
         self.queue.append((v_cmd, w_cmd))
         v_cmd, w_cmd = self.queue.pop(0)
+        if abs(v_cmd) < DEADBAND:
+            v_cmd = 0.0
         dv = max(-self.m.accel * dt, min(self.m.accel * dt, v_cmd - self.v))
         self.v += dv
         if self.m.steering == "ackermann":
             ref = self.v if abs(self.v) > 0.05 else math.copysign(0.05, v_cmd if abs(v_cmd) > 1e-6 else 1.0)
             want = math.atan(w_cmd * self.m.wheelbase / ref) if abs(w_cmd) > 1e-3 else 0.0
             want = max(-self.m.max_steer, min(self.m.max_steer, want))
-            rate = (self.m.steer_rate or 10.0) * dt
+            slowed = lambda v: 1.0 + (1.0 - min(abs(v) / STEER_FREE_MPS, 1.0)) * (STEER_STILL - 1.0)  # noqa: E731
+            rate = (self.m.steer_rate or 10.0) * slowed(STEER_MEASURED_MPS) / slowed(self.v) * dt
             self.steer += max(-rate, min(rate, want - self.steer))
             slid = math.tan(self.steer + SLIP_FRONT) - math.tan(SLIP_REAR)
             self.w = self.v * math.cos(SLIP_REAR) * slid / self.m.wheelbase
