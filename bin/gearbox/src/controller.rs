@@ -2610,21 +2610,22 @@ fn record_wheel_tracks(
             }
             let p = DVec3::new(p[0], p[1], p[2]);
             let ground = crate::world::terrain_height_m(p.x as f32, p.z as f32);
-            let contact_point = if let Some(output) = tyre {
+            if let Some(output) = tyre {
                 values.set(&machine.id, &link.name, "normal_force", output.normal_force);
                 values.set(&machine.id, &link.name, "slip_angle", output.slip_angle);
-                if !output.in_contact {
-                    continue;
-                }
-                Vec3::new(
+            }
+            // A tyre presses the sward while its lowest point is within the
+            // slack of the ground, touching it or bounced just off it.
+            let contact_point = match tyre {
+                Some(output) if output.in_contact => Vec3::new(
                     (output.contact_point.x - gearbox_globe::physics_offset(site).x) as f32,
                     output.contact_point.y as f32,
                     output.contact_point.z as f32,
-                )
-            } else if p.y as f32 - radius as f32 > ground + WHEEL_TRACK_CONTACT_SLACK_M {
-                continue;
-            } else {
-                Vec3::new(p.x as f32, ground, p.z as f32)
+                ),
+                _ if p.y as f32 - radius as f32 <= ground + WHEEL_TRACK_CONTACT_SLACK_M => {
+                    Vec3::new(p.x as f32, ground, p.z as f32)
+                }
+                _ => continue,
             };
             let axle_world = body.rotation() * axle_local;
             let axle = Vec2::new(axle_world.x as f32, axle_world.z as f32).normalize_or(Vec2::X);
@@ -2668,16 +2669,25 @@ fn record_wheel_tracks(
             let centreline = anchor
                 + axle_of_roll * *held
                 + roll * (here - anchor).dot(roll);
+            let wheel = {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                (machine.id.as_str(), link.name.as_str()).hash(&mut hasher);
+                hasher.finish()
+            };
+            // The whole tyre lays the sward over, however narrow the patch it
+            // bears on the soil with.
             contacts.contacts.push(gearbox_fields::WheelContact {
                 position: contact_point,
                 direction: roll,
-                width: tyre.and_then(|out| out.pressure).map_or(width, |p| p.patch_width) as f32,
+                width: width as f32,
                 length: tyre.and_then(|out| out.pressure).map(|p| p.patch_length as f32),
                 ground_kpa: ground_kpa(tyre.as_ref()),
                 scrub: scrub.clamp(0.0, 1.0),
                 travelled,
                 anchor,
                 centreline,
+                wheel,
             });
         }
     }

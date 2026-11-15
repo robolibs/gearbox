@@ -523,7 +523,6 @@ pub fn ensure_fields(world: &mut World) {
                 trample,
                 work,
                 workable: profile.workable,
-                footprint_length: response.footprint_length,
                 tread: response.tread,
                 params: VegetationParams {
                     origin: Vec2::new(grid.min_x, grid.min_z),

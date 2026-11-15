@@ -41,6 +41,8 @@ pub struct WheelContact {
     /// laden trailer on narrow tyres cuts in where an empty tractor on flotation
     /// tyres barely marks, and only this tells the two apart.
     pub ground_kpa: f32,
+    /// Which wheel this is, the same from frame to frame.
+    pub wheel: u64,
 }
 
 impl WheelContact {
@@ -59,6 +61,7 @@ fn explicit_wheel_footprint_overrides_field_default() {
         width: 0.4,
         scrub: 0.0,
         ground_kpa: 100.0,
+        wheel: 0,
         travelled: 0.0,
         anchor: Vec2::ZERO,
         centreline: Vec2::ZERO,
@@ -172,18 +175,42 @@ pub struct WheelContacts {
 /// larger number here.
 pub const TRAMPLE_CLOCK_S: f32 = 3600.0;
 
-/// Encodes a stamp: time on the wrapped clock, then one channel packing the
-/// roll direction (8 bits), where across the tyre the texel lies (4 bits,
-/// -1..1) and the scrub (4 bits, never 0, so 0 means never stamped).
-pub fn trample_texel(now: f32, direction: Vec2, across: f32, scrub: f32) -> [u16; 2] {
+/// How long a wheel's bare scar takes to green over; `SCAR_SECONDS` in
+/// `shaders/interaction.wesl`.
+pub const SCAR_SECONDS: f32 = 720.0;
+
+/// How far either side of a track's edge a stamp's distance reaches, in
+/// texels; `EDGE_REACH_TEXELS` in `shaders/interaction.wesl`.
+pub const EDGE_REACH_TEXELS: f32 = 1.5;
+
+/// Encodes a stamp in two channels: the time on the wrapped clock (12 bits)
+/// over the scrub (4 bits, never 0, so 0 means never stamped); then the roll
+/// direction (8 bits) over the texel's signed distance inside the track's
+/// edge (8 bits, ±`EDGE_REACH_TEXELS`).
+pub fn trample_texel(now: f32, direction: Vec2, inside: f32, scrub: f32) -> [u16; 2] {
     // Floored so a stamp never lands ahead of the shader clock: a stamp in
     // the future would read as a whole clock period old and spring back up.
-    let time = ((now.rem_euclid(TRAMPLE_CLOCK_S) / TRAMPLE_CLOCK_S) * 65535.0).floor() as u16;
+    let time = ((now.rem_euclid(TRAMPLE_CLOCK_S) / TRAMPLE_CLOCK_S) * 4095.0).floor() as u16;
+    let scrub = ((scrub.clamp(0.0, 1.0) * 15.0).round() as u16).max(1);
     let angle = (direction.y.atan2(direction.x) + std::f32::consts::PI) / std::f32::consts::TAU;
     let angle = (angle * 255.0).round() as u16 & 255;
-    let across = ((across.clamp(-1.0, 1.0) * 0.5 + 0.5) * 15.0).round() as u16;
-    let scrub = ((scrub.clamp(0.0, 1.0) * 15.0).round() as u16).max(1);
-    [time, angle << 8 | across << 4 | scrub]
+    let inside = (((inside / EDGE_REACH_TEXELS).clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u16;
+    [time << 4 | scrub, angle << 8 | inside]
+}
+
+/// Whether a texel was ever stamped.
+pub fn texel_stamped(texel: [u16; 4]) -> bool {
+    texel[0] & 15 != 0
+}
+
+/// When a texel was stamped, in seconds on the wrapped clock.
+pub fn texel_time(texel: [u16; 4]) -> f32 {
+    f32::from(texel[0] >> 4) / 4095.0 * TRAMPLE_CLOCK_S
+}
+
+/// A texel's signed distance inside its track's edge, in texels.
+pub fn texel_inside(texel: [u16; 4]) -> f32 {
+    (f32::from(texel[1] & 255) / 255.0 * 2.0 - 1.0) * EDGE_REACH_TEXELS
 }
 
 pub(super) fn begin_wheel_contacts(mut contacts: ResMut<WheelContacts>, time: Res<Time>) {

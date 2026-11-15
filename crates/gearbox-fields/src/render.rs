@@ -27,7 +27,8 @@ use bevy::render::texture::{FallbackImage, GpuImage};
 use bevy::render::view::ExtractedView;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
-use super::contacts::{WheelContacts, trample_texel, tread_texel};
+use super::contacts::{EDGE_REACH_TEXELS, WheelContacts, trample_texel, tread_texel};
+use super::trample::{self, TrampleMirrors, merged};
 use super::profile::WheelMapParams;
 use bevy::platform::collections::HashMap;
 use std::ops::Range;
@@ -115,7 +116,6 @@ pub struct FieldGpu {
     /// Whether a tool can work this field; others share an empty work map.
     pub workable: bool,
     pub params: VegetationParams,
-    pub footprint_length: f32,
     /// The wheel map carries tread coordinates in two more channels.
     pub tread: bool,
 }
@@ -203,6 +203,7 @@ impl Plugin for VegetationPlugin {
                 init_vegetation_pipeline.after(MeshPipelineSystems),
             )
             .init_resource::<VegetationUniforms>()
+            .init_resource::<TrampleMirrors>()
             .add_systems(
                 Render,
                 (
@@ -504,135 +505,113 @@ pub(crate) fn prepare_vegetation_bind_group(
     commands.insert_resource(FieldBindGroups { fields: groups, empty });
 }
 
-/// Writes oriented wheel footprints with a timestamp and roll direction.
+/// Longest pause, and furthest move, a wheel's stamp is swept across; past
+/// either it left the ground or was moved, and starts afresh.
+const SWEEP_GAP_S: f32 = 0.5;
+const SWEEP_GAP_M: f32 = 3.0;
+
+/// Lays the line each wheel drove since its last stamp into the wheel maps:
+/// a texel near it gets its distance inside the tyre's edge, merged with
+/// what it already holds by `trample::merged`.
 fn stamp_wheel_contacts(
     fields: Res<RenderFields>,
     contacts: Option<Res<WheelContacts>>,
     images: Res<RenderAssets<GpuImage>>,
     render_queue: Res<RenderQueue>,
+    mut mirrors: ResMut<TrampleMirrors>,
+    mut last: Local<HashMap<u64, (Vec2, f32)>>,
     mut stamped: Local<bevy::platform::collections::HashSet<Entity>>,
 ) {
     stamped.retain(|entity| fields.0.contains_key(entity));
     let Some(contacts) = contacts else {
         return;
     };
+    let now = contacts.now;
+    mirrors.sweep(
+        |id| {
+            fields.0.values().chain(&fields.1.fields)
+                .find(|field| field.trample.id() == *id)
+                .map(|field| trample::horizon(field.params.wheels.recovery_seconds))
+        },
+        now,
+    );
+    last.retain(|_, (_, seen)| trample::age(now, *seen) < SWEEP_GAP_S);
     if contacts.contacts.is_empty() {
         return;
     }
+    let ground = |contact: &super::contacts::WheelContact| Vec2::new(contact.position.x, contact.position.z);
+    let starts: Vec<Vec2> = contacts
+        .contacts
+        .iter()
+        .map(|contact| match last.get(&contact.wheel) {
+            Some(&(was, _)) if was.distance(ground(contact)) < SWEEP_GAP_M => was,
+            _ => ground(contact),
+        })
+        .collect();
+    for contact in &contacts.contacts {
+        last.insert(contact.wheel, (ground(contact), now));
+    }
     for (&entity, field) in &fields.0 {
-        let Some(trample) = images.get(&field.trample) else {
+        let Some(map) = images.get(&field.trample) else {
             continue;
         };
-        let tpm = field.params.wheels.texels_per_metre;
-        let width = field.params.wheels.width as i32;
-        let height = field.params.wheels.height as i32;
-        for contact in &contacts.contacts {
-            // The footprint is a rectangle in the wheel's own frame: tyre width
-            // across the axle, a short contact patch along the roll. Texel
-            // centres sit on integer coordinates; a texel is stamped only when
-            // its centre lies inside that rectangle, row by row.
-            let centre = Vec2::new(
-                (contact.position.x - field.params.wheels.origin.x) * tpm,
-                (contact.position.z - field.params.wheels.origin.y) * tpm,
-            );
-            // The tread is measured across from the wheel's steadied line, not
-            // from where the contact happens to be sitting this frame.
-            let line = (contact.centreline - field.params.wheels.origin) * tpm;
+        let wheels = field.params.wheels;
+        let tpm = wheels.texels_per_metre;
+        let corner = IVec2::new(wheels.width as i32 - 1, wheels.height as i32 - 1);
+        let mirror = mirrors.maps.entry(field.trample.id()).or_default();
+        for (contact, &start) in contacts.contacts.iter().zip(&starts) {
+            let from = (start - wheels.origin) * tpm;
+            let to = (ground(contact) - wheels.origin) * tpm;
+            // The tread is measured across from the wheel's steadied line.
+            let line = (contact.centreline - wheels.origin) * tpm;
             let roll = contact.direction.normalize_or(Vec2::X);
-            let axle = roll.perp();
-            let half_width = (contact.width * 0.5 * tpm).max(0.5);
-            // Stamped a texel wider than the tyre on each side, and a texel
-            // longer. Only whole texels can be written, so the stamped edge
-            // lands wherever the grid happens to fall relative to the wheel —
-            // and as a machine drifts sideways against that grid the band gains
-            // a texel down one side, then metres later down the other. An
-            // eighth of a metre, appearing and disappearing every few metres:
-            // it is what makes a pressed track look like it keeps changing
-            // width, in the grass as much as in the tread. Stamping past the
-            // tyre lets the shader cut the true edge from the smooth offset
-            // across the tyre instead, which no grid can step.
-            let laid_width = half_width + 1.0;
-            let footprint = contact.footprint_length(field.footprint_length);
-            let half_length = (footprint * 0.5 * tpm).max(0.5) + 1.0;
-            let reach = laid_width.hypot(half_length);
-            let z0 = ((centre.y - reach).ceil() as i32).clamp(0, height - 1);
-            let z1 = ((centre.y + reach).floor() as i32).clamp(0, height - 1);
-            let x_lo = ((centre.x - reach).ceil() as i32).clamp(0, width - 1);
-            let x_hi = ((centre.x + reach).floor() as i32).clamp(0, width - 1);
-            for z in z0..=z1 {
-                let inside = |x: i32| {
-                    let d = Vec2::new(x as f32, z as f32) - centre;
-                    d.dot(axle).abs() <= laid_width && d.dot(roll).abs() <= half_length
-                };
-                let Some(x0) = (x_lo..=x_hi).find(|x| inside(*x)) else {
-                    continue;
-                };
-                let x1 = (x0..=x_hi).take_while(|x| inside(*x)).last().unwrap_or(x0);
-                let width = (x1 - x0 + 1) as u32;
-                // A tread map also records, per texel, how far the wheel had
-                // rolled and where across the tyre the texel lies.
+            let half_width = contact.width * 0.5 * tpm;
+            for (z, x0, x1) in trample::rows(from, to, half_width, IVec2::ZERO, corner) {
                 let data: Vec<u16> = (x0..=x1)
                     .flat_map(|x| {
-                        let d = Vec2::new(x as f32, z as f32) - centre;
-                        let stamp = trample_texel(contacts.now, roll, d.dot(axle) / half_width, contact.scrub);
-                        // Every wheel lays its own tread, and none of them ever
-                        // writes the channels empty. A stamp replaces what was
-                        // there, so writing nothing *is* rubbing out: a tractor
-                        // steering one way and then the other sweeps its front
-                        // wheels across the tracks its rear wheels left, and a
-                        // narrow wheel told to lay no tread erased them at every
-                        // crossing. A wheel passing over an older mark lays its
-                        // own over the top, which is what happens on the ground.
-                        let tread = field.tread.then(|| {
-                            // How far along the track, measured from the wheel
-                            // itself: the machine's rolled distance plus this
-                            // texel's own offset from the contact, which is
-                            // never more than a tyre's width.
-                            //
-                            // Never the texel's place projected on the heading,
-                            // however tempting that looks. A projection has a
-                            // lever arm — the distance to whatever it is
-                            // measured from — and multiplies every wobble of
-                            // the steering by it. Half a degree of correction
-                            // a hundred metres out from the origin slides the
-                            // whole tread sideways by several lug pitches,
-                            // along the ruled line where one stamp gives way to
-                            // the next. Rolled distance has no lever arm at all.
-                            let from_machine = Vec2::new(x as f32, z as f32)
-                                - (contact.anchor - field.params.wheels.origin) * tpm;
-                            tread_texel(
-                                contact.travelled + from_machine.dot(roll) / tpm,
-                                (Vec2::new(x as f32, z as f32) - line).dot(axle) / tpm,
-                                half_width / tpm)
-                        });
-                        stamp.into_iter().chain(tread.into_iter().flatten())
+                        let at = IVec2::new(x, z);
+                        let depth = trample::inside(at.as_vec2(), from, to, half_width);
+                        let kept = if depth > -EDGE_REACH_TEXELS {
+                            let [time, packed] = trample_texel(now, roll, depth, contact.scrub);
+                            // How far along the track, from the machine's rolled
+                            // distance, never from a projection with a lever arm.
+                            let [along, place] = if field.tread {
+                                let texel = Vec2::new(x as f32, z as f32);
+                                let from_machine = texel - (contact.anchor - wheels.origin) * tpm;
+                                tread_texel(
+                                    contact.travelled + from_machine.dot(roll) / tpm,
+                                    (texel - line).dot(roll.perp()) / tpm,
+                                    contact.width * 0.5,
+                                )
+                            } else {
+                                [0, 0]
+                            };
+                            let kept = merged(mirror.get(at), [time, packed, along, place], now, wheels.recovery_seconds);
+                            mirror.set(at, kept, now);
+                            kept
+                        } else {
+                            mirror.get(at)
+                        };
+                        kept.into_iter().take(if field.tread { 4 } else { 2 })
                     })
                     .collect();
-                let texel_bytes = if field.tread { 8 } else { 4 };
-                let mut target = trample.texture.as_image_copy();
-                target.origin = Origin3d {
-                    x: x0 as u32,
-                    y: z as u32,
-                    z: 0,
-                };
+                let span = (x1 - x0 + 1) as u32;
+                let mut target = map.texture.as_image_copy();
+                target.origin = Origin3d { x: x0 as u32, y: z as u32, z: 0 };
                 render_queue.write_texture(
                     target,
                     bytemuck::cast_slice(&data),
                     TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(width * texel_bytes),
+                        bytes_per_row: Some(span * if field.tread { 8 } else { 4 }),
                         rows_per_image: None,
                     },
-                    Extent3d {
-                        width,
-                        height: 1,
-                        depth_or_array_layers: 1,
-                    },
+                    Extent3d { width: span, height: 1, depth_or_array_layers: 1 },
                 );
                 if stamped.insert(entity) {
                     info!(
                         "field {entity}: first wheel stamp at {:?}, clock {:.2}, map origin {:?}",
-                        contact.position, contacts.now, field.params.wheels.origin
+                        contact.position, now, wheels.origin
                     );
                 }
             }
@@ -1017,6 +996,7 @@ fn carry_wheel_tracks(
     images: Res<RenderAssets<GpuImage>>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
+    mut mirrors: ResMut<TrampleMirrors>,
     mut carried: Local<bevy::platform::collections::HashSet<Entity>>,
 ) {
     carried.retain(|entity| fields.0.contains_key(entity));
@@ -1071,6 +1051,13 @@ fn carry_wheel_tracks(
                 Extent3d { width: extent.x, height: extent.y, depth_or_array_layers: 1 },
             );
             copied = true;
+            let moved = mirrors.maps.get(&old.trample.id()).map(|mirror| {
+                mirror.carried(from.as_ivec2(), to.as_ivec2(), extent.as_ivec2())
+            });
+            let mirror = mirrors.maps.entry(field.trample.id()).or_default();
+            for (at, texel, newest) in moved.into_iter().flatten() {
+                mirror.set(at, texel, newest);
+            }
         }
     }
     if copied {

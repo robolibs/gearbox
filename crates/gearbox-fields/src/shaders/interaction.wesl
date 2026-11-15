@@ -14,16 +14,25 @@ struct WheelMapParams {
     bar: vec4<f32>,
 }
 
-fn wheel_texel(tex: texture_2d<u32>, index: vec2<i32>, recovery: f32) -> vec3<f32> {
+// How far either side of a track's edge a texel's distance reaches, in
+// texels, `EDGE_REACH_TEXELS` in `contacts.rs`; and the half width of the
+// soft edge the distance is cut at, in metres.
+const EDGE_REACH_TEXELS: f32 = 1.5;
+const EDGE_SOFT_M: f32 = 0.008;
+
+// A texel's stamp: how fresh, how far inside its track's edge (texels), and
+// its roll. Never stamped reads as a full reach outside any track.
+fn wheel_texel(tex: texture_2d<u32>, index: vec2<i32>, recovery: f32) -> vec4<f32> {
     let texel = textureLoad(tex, index, 0);
-    if (texel.g == 0u) { return vec3<f32>(0.0); }
-    let stamped = f32(texel.r) / 65535.0 * 3600.0;
+    if ((texel.r & 15u) == 0u) { return vec4<f32>(0.0, -EDGE_REACH_TEXELS, 0.0, 0.0); }
+    let stamped = f32(texel.r >> 4u) / 4095.0 * 3600.0;
     // A stamp a moment ahead of this frame is fresh, not a period old.
     let delta = globals.time - stamped;
     let age = select(delta, max(delta + 3600.0, 0.0), delta < -8.0);
-    let press = 1.0 - clamp(age / max(recovery, 0.001), 0.0, 1.0);
+    let fresh = 1.0 - clamp(age / max(recovery, 0.001), 0.0, 1.0);
+    let inside = (f32(texel.g & 255u) / 255.0 * 2.0 - 1.0) * EDGE_REACH_TEXELS;
     let angle = f32(texel.g >> 8u) / 255.0 * 6.2831853 - 3.1415927;
-    return vec3<f32>(press, cos(angle) * press, sin(angle) * press);
+    return vec4<f32>(fresh, inside, cos(angle), sin(angle));
 }
 
 // How long a wheel's bare scar takes to green over. A flattened sward springs
@@ -43,7 +52,11 @@ fn sample_wheels_over(tex: texture_2d<u32>, params: WheelMapParams, world_xz: ve
     let b = wheel_texel(tex, i + vec2<i32>(1, 0), recovery);
     let c = wheel_texel(tex, i + vec2<i32>(0, 1), recovery);
     let d = wheel_texel(tex, i + vec2<i32>(1, 1), recovery);
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    // The distance blends to its exact zero at the tyre's edge; pressed is
+    // that edge, cut soft by a few millimetres, times how fresh the press is.
+    let m = mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    let press = m.x * smoothstep(-EDGE_SOFT_M, EDGE_SOFT_M, m.y / params.texels_per_metre);
+    return vec3<f32>(press, m.z * press, m.w * press);
 }
 
 fn sample_wheels(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec2<f32>) -> vec3<f32> {
@@ -136,7 +149,7 @@ fn sample_wheel_mark(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec
         // renormalised, the answer steps by a share of the tyre's width
         // wherever a corner falls off the end of a pass — which is a seam
         // running diagonally down the track, exactly where two passes meet.
-        let known = there.g != 0u && there.a != 0u;
+        let known = (there.r & 15u) != 0u && there.a != 0u;
         let turn = f32(there.g >> 8u) / 255.0 * 6.2831853 - 3.1415927;
         let its_roll = select(near_roll, vec2<f32>(cos(turn), sin(turn)), known);
         let its_axle = vec2<f32>(-its_roll.y, its_roll.x);
@@ -165,7 +178,7 @@ fn sample_wheel_mark(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec
     // reads as its own bias, which is a constant offset from the tyre's middle:
     // every bar then leans the same way and the chevron comes out as half of
     // itself, drawn as parallel diagonals.
-    if (press < 0.001 || texel.g == 0u || texel.a == 0u) {
+    if (press < 0.001 || (texel.r & 15u) == 0u || texel.a == 0u) {
         return WheelMark(0.0, 0.0, 0.0, 0.0, vec2<f32>(0.0), vec2<f32>(0.0), 1e9);
     }
     // Rolled distance stays the nearest texel's, unblended: the stamp writes a
@@ -186,6 +199,6 @@ fn sample_wheel_mark(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec
     // turn does not cut its own track away; the middle is the well-behaved
     // reading above, so the two are taken together.
     let inside = min(closest, abs(across) / max(half_width, 0.01));
-    return WheelMark(press, f32(texel.g & 15u) / 15.0, along / TREAD_PITCH_M, across / half_width,
+    return WheelMark(press, f32(texel.r & 15u) / 15.0, along / TREAD_PITCH_M, across / half_width,
         vec2<f32>(along, across), roll, inside);
 }
