@@ -228,9 +228,10 @@ def scenario(name: str, s: float, m: "Machine | None" = None) -> Scenario:
         posts = street(lo - room, hi + room, -2.0 * s, x_turn + 1.5 * radius + machine.length, 0.15 * s, 0.9 * s)
         return Scenario(name, pts, speeds=speeds, reverse=True, static=posts, lost=4.0 * s, time_limit=60.0 * s)
     if name == "bumps":
-        # 300 m weaving east over rolling ground, laid for
-        # `ONDRIVE_LAB_AREA=-150,-200` with `ONDRIVE_LAB_FIELDS` sinking lanes
-        # across it every 12 m: posts on the line and two crossers.
+        # 300 m weaving east over grassed ridges, dips and mounds, laid for
+        # `ONDRIVE_LAB_AREA=-150,-200` with `ONDRIVE_LAB_FIELDS` set to
+        # `crates/gearbox-fields/src/layouts/washboard.json`: posts on the
+        # line and two crossers.
         sway = lambda u: 3.0 * math.sin(2 * math.pi * u / 60.0)  # noqa: E731
         pts = [(float(u), sway(u)) for u in range(0, 301)]
         posts = [(u, sway(u) + dy, 0.5) for u, dy in ((70, 0.1), (140, -0.15), (210, 0.1), (262, -0.1))]

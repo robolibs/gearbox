@@ -414,10 +414,11 @@ fn take_fields_layout(
         return;
     }
     info!(
-        "fields: new layout at home, default {}, {} fields, {} ways",
+        "fields: new layout at home, default {}, {} fields, {} ways, {} relief",
         layout.default,
         layout.fields.len(),
-        layout.ways.len()
+        layout.ways.len(),
+        layout.relief.len()
     );
     commands.insert_resource(HomeLayout(layout.clone()));
     if sites.current == 0 {
@@ -426,6 +427,7 @@ fn take_fields_layout(
         commands.insert_resource(gearbox_fields::FieldLayout {
             fields: Vec::new(),
             ways: Vec::new(),
+            relief: Vec::new(),
             ..layout
         });
     }
@@ -451,16 +453,17 @@ fn enter_site(
         };
         // Only the home site is laid out; elsewhere the default cover stands
         // alone, so its roads have nothing to cross either.
-        let (fields, ways) = if to == 0 {
-            (home.0.fields.clone(), home.0.ways.clone())
+        let (fields, ways, relief) = if to == 0 {
+            (home.0.fields.clone(), home.0.ways.clone(), home.0.relief.clone())
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new())
         };
         world.insert_resource(gearbox_fields::FieldLayout {
             default: home.0.default,
             default_friction: home.0.default_friction,
             fields,
             ways,
+            relief,
         });
     });
     info!("globe: view now in site `{}` ({} sites)", sites.list[to].name, sites.list.len());

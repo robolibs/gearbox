@@ -295,6 +295,23 @@ mod tests {
         assert!(Hollows::of(&plain).is_empty());
     }
 
+    #[test]
+    fn relief_raises_and_digs_the_ground() {
+        let layout: FieldLayout = serde_json::from_str(
+            r#"{"default":"grassland","relief":[
+                {"name":"ridge","points":[[0,-20],[0,20]],"width":4,"height":0.3},
+                {"name":"pit","points":[[30,0]],"width":6,"height":-0.5}]}"#,
+        )
+        .unwrap();
+        let ground = Hollows::of(&layout);
+        assert!((ground.depth_at(0.0, 5.0) + 0.3).abs() < 1e-5);
+        assert!((ground.depth_at(1.0, 5.0) + 0.15).abs() < 1e-5);
+        assert_eq!(ground.depth_at(2.0, 5.0), 0.0);
+        assert!((ground.depth_at(30.0, 0.0) - 0.5).abs() < 1e-5);
+        assert_eq!(ground.depth_at(30.0, 3.0), 0.0);
+        assert!(layout.ways.is_empty() && layout.fields.is_empty());
+    }
+
     // Two roads crossing one field share the sixteen points end to end, each
     // keeping its own width; the shader walks them as two separate lines.
     #[test]
@@ -513,6 +530,15 @@ mod tests {
             .unwrap()
             .validate(&profiles, FieldBounds { min: Vec2::splat(-400.0), max: Vec2::splat(400.0) })
             .unwrap();
+
+        let shaped = |relief: &str| format!(r#"{{"default":"grassland","relief":[{relief}]}}"#);
+        serde_json::from_str::<FieldLayout>(&shaped(r#"{"name":"r","width":4,"height":0.3,"points":[[0,0]]}"#))
+            .unwrap()
+            .validate(&profiles, FieldBounds { min: Vec2::splat(-400.0), max: Vec2::splat(400.0) })
+            .unwrap();
+        assert!(refuses(&shaped(r#"{"name":"r","width":4,"height":0.3,"points":[]}"#)).contains("no points"));
+        assert!(refuses(&shaped(r#"{"name":"r","width":4,"height":9,"points":[[0,0]]}"#)).contains("past"));
+        assert!(refuses(&shaped(r#"{"name":"r","width":-1,"height":0.3,"points":[[0,0]]}"#)).contains("m wide"));
 
         let with = |ways: &str| format!(r#"{{"default":"grassland","ways":[{ways}]}}"#);
         assert!(
@@ -1054,6 +1080,69 @@ impl WaySpec {
     }
 }
 
+/// A ridge or a dip along a line, or a mound or a pit at a single point. It
+/// shapes the ground and leaves its cover alone: grass grows over it as it
+/// grows beside it.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReliefSpec {
+    pub name: String,
+    /// World XZ points of its crest; one point makes a round mound.
+    pub points: Vec<[f32; 2]>,
+    /// Metres across its foot.
+    pub width: f32,
+    /// Metres its crest stands above the ground; negative digs a dip.
+    pub height: f32,
+}
+
+/// The tallest ridge or deepest dip a layout may shape.
+pub const RELIEF_MOST_M: f32 = 3.0;
+
+#[derive(Clone, Debug)]
+struct Rise {
+    line: Vec<Vec2>,
+    half: f32,
+    height: f32,
+    min: Vec2,
+    max: Vec2,
+}
+
+impl Rise {
+    fn new(spec: &ReliefSpec) -> Option<Self> {
+        if spec.points.is_empty() || spec.width <= 0.0 || spec.height == 0.0 {
+            return None;
+        }
+        let line: Vec<Vec2> = spec.points.iter().copied().map(Vec2::from_array).collect();
+        let half = spec.width * 0.5;
+        let fold = |pick: fn(Vec2, Vec2) -> Vec2| line.iter().copied().reduce(pick).unwrap();
+        Some(Self {
+            half,
+            height: spec.height,
+            min: fold(Vec2::min) - Vec2::splat(half),
+            max: fold(Vec2::max) + Vec2::splat(half),
+            line,
+        })
+    }
+
+    /// Raised cosine across the crest, nought at the foot.
+    fn height_at(&self, place: Vec2) -> f32 {
+        if place.cmplt(self.min).any() || place.cmpgt(self.max).any() {
+            return 0.0;
+        }
+        let mut nearest = place.distance(self.line[0]);
+        for leg in self.line.windows(2) {
+            let run = leg[1] - leg[0];
+            let length = run.length().max(1e-4);
+            let at = (place - leg[0]).dot(run / length).clamp(0.0, length);
+            nearest = nearest.min(place.distance(leg[0] + run / length * at));
+        }
+        if nearest >= self.half {
+            return 0.0;
+        }
+        self.height * 0.5 * (1.0 + (std::f32::consts::PI * nearest / self.half).cos())
+    }
+}
+
 /// How deep the ways of a layout sit below the ground around them, as a plain
 /// function of world XZ. A track used for years is a hollow, not a stripe of
 /// colour on a flat field: this is what lets one break the skyline at a
@@ -1065,7 +1154,10 @@ impl WaySpec {
 /// trench dug down the middle of it: guessing which wide fields were meant to
 /// be lanes would sink a ploughed plot along its long axis.
 #[derive(Clone, Debug, Default)]
-pub struct Hollows(Vec<Hollow>);
+pub struct Hollows {
+    ways: Vec<Hollow>,
+    relief: Vec<Rise>,
+}
 
 #[derive(Clone, Debug)]
 struct Hollow {
@@ -1127,18 +1219,27 @@ impl Hollows {
         // are the same thing authored at two scales; both sink what they cross.
         let roads = layout.ways.iter().map(|way| (way.line(), way.width, way.wear));
         let lanes = layout.fields.iter().map(FieldSpec::laid_way);
-        Self(roads.chain(lanes).filter_map(Hollow::new).collect())
+        Self {
+            ways: roads.chain(lanes).filter_map(Hollow::new).collect(),
+            relief: layout.relief.iter().filter_map(Rise::new).collect(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.ways.is_empty() && self.relief.is_empty()
     }
 
-    /// How far the ground drops here, in metres; nought away from every way.
+    /// How far the ground drops here, in metres: the ways' hollows less the
+    /// relief's rise; nought away from both.
     pub fn depth_at(&self, x: f32, z: f32) -> f32 {
         let place = Vec2::new(x, z);
+        let rise: f32 = self.relief.iter().map(|rise| rise.height_at(place)).sum();
+        self.way_depth(place) - rise
+    }
+
+    fn way_depth(&self, place: Vec2) -> f32 {
         let mut deepest = 0.0f32;
-        for hollow in &self.0 {
+        for hollow in &self.ways {
             // Nearly every point of a square kilometre is nowhere near a road,
             // and the walk down its legs is far dearer than four compares.
             if place.cmplt(hollow.min).any() || place.cmpgt(hollow.max).any() {
@@ -1195,6 +1296,9 @@ pub struct FieldLayout {
     /// Roads laid over the fields; the first one a field meets wears it.
     #[serde(default)]
     pub ways: Vec<WaySpec>,
+    /// Ridges and dips shaped into the ground under whatever grows on it.
+    #[serde(default)]
+    pub relief: Vec<ReliefSpec>,
 }
 
 impl Default for FieldLayout {
@@ -1285,6 +1389,23 @@ impl FieldLayout {
                 return Err(format!("way {} needs two points to lead anywhere", way.name));
             }
             check_way(&way.name, &way.points, Some(way.width), Some(way.wear))?;
+        }
+        for (i, relief) in self.relief.iter().enumerate() {
+            if relief.name.trim().is_empty()
+                || self.relief[..i].iter().any(|other| other.name == relief.name)
+            {
+                return Err(format!("empty or duplicate relief name: {}", relief.name));
+            }
+            if relief.points.is_empty() {
+                return Err(format!("relief {} has no points", relief.name));
+            }
+            check_way(&relief.name, &relief.points, Some(relief.width), None)?;
+            if !relief.height.is_finite() || relief.height.abs() > RELIEF_MOST_M {
+                return Err(format!(
+                    "relief {} is {} m high, past ±{RELIEF_MOST_M} m",
+                    relief.name, relief.height
+                ));
+            }
         }
         Ok(())
     }

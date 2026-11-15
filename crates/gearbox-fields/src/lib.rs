@@ -31,7 +31,7 @@ pub use host::{
     CoverBackdrop, CoverHeights, CoverSurfaceMesh, CoverTerrain, CoverTerrainRoots, CoverWind,
     HeightSource,
 };
-pub use layout::{FieldBounds, FieldLayout, Hollows};
+pub use layout::{FieldBounds, FieldLayout, Hollows, ReliefSpec};
 pub use render::NoVegetation;
 pub use runtime::{CoverPending, heightmap_image};
 pub use profile::{

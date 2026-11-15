@@ -189,7 +189,7 @@ fn fields_for(body: gearbox_globe::Body) -> gearbox_fields::FieldsPlugin {
     if body == gearbox_globe::Body::Earth { return gearbox_fields::FieldsPlugin::default(); }
     gearbox_fields::FieldsPlugin {
         layout: gearbox_fields::FieldLayout {
-            default: body.name().into(), default_friction: Some(0.75), fields: Vec::new(), ways: Vec::new(),
+            default: body.name().into(), default_friction: Some(0.75), fields: Vec::new(), ways: Vec::new(), relief: Vec::new(),
         },
         grass_density: 0.0, stubble_density: 0.0, concrete_weed_density: 0.0,
     }
