@@ -418,11 +418,25 @@ class Reference:
     def error(self, x, y, reach=3.0):
         """Distance to the nearest segment around the progress mark, which
         only moves forward and looks `reach` metres on: reversing out of a
-        cusp scores against the leg leaving it, not the one it came in on."""
+        cusp scores against the leg leaving it, not the one it came in on.
+        Off by more than `reach` there, all the path ahead is searched, as
+        where a manoeuvre turns about away from a turn drawn tighter."""
         n = len(self.pts) - 1
         ahead = max(30, math.ceil(reach * n / max(self.lap_len, 1e-9)))
+        best = self._nearest(x, y, -3, ahead)
+        if best[0] > reach and not self.closed:
+            best = min(best, self._nearest(x, y, ahead, n - self.seg))
+        self.seg += max(best[1], 0)
+        if self.closed:
+            self.seg %= n
+        return best[0]
+
+    def _nearest(self, x, y, lo, hi):
+        """Distance to the nearest of segments `lo` to `hi` on from the
+        progress mark, and which."""
+        n = len(self.pts) - 1
         best = (float("inf"), 0)
-        for k in range(-3, ahead):
+        for k in range(lo, hi):
             i = self.seg + k
             if self.closed:
                 i %= n
@@ -435,10 +449,7 @@ class Reference:
             d = math.hypot(ax + t * vx - x, ay + t * vy - y)
             if d < best[0] - 1e-9:
                 best = (d, k)
-        self.seg += max(best[1], 0)
-        if self.closed:
-            self.seg %= n
-        return best[0]
+        return best
 
 
 # ─── the lab ─────────────────────────────────────────────────────────
