@@ -172,6 +172,10 @@ pub struct WheelContacts {
 /// larger number here.
 pub const TRAMPLE_CLOCK_S: f32 = 3600.0;
 
+/// How long a wheel's bare scar takes to green over; `SCAR_SECONDS` in
+/// `shaders/interaction.wesl`.
+pub const SCAR_SECONDS: f32 = 720.0;
+
 /// Half-widths of the tyre either side of its middle that the across channel
 /// of a stamp spans: the texels laid past the tyre's edge read as past it, so
 /// the shaders cut the pressed band at the tyre's true edge. `ACROSS_SPAN` in
