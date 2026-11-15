@@ -43,9 +43,6 @@ pub struct WheelContact {
     pub ground_kpa: f32,
     /// Which wheel this is, the same from frame to frame.
     pub wheel: u64,
-    /// How hard it lays the sward over, 0..1: fully on the ground, less as
-    /// it rides higher over it.
-    pub press: f32,
 }
 
 impl WheelContact {
@@ -65,7 +62,6 @@ fn explicit_wheel_footprint_overrides_field_default() {
         scrub: 0.0,
         ground_kpa: 100.0,
         wheel: 0,
-        press: 1.0,
         travelled: 0.0,
         anchor: Vec2::ZERO,
         centreline: Vec2::ZERO,
@@ -242,7 +238,7 @@ pub const TRAIL_JOIN_S: f32 = 3.0;
 pub const TRAIL_JOIN_M: f32 = 1.5;
 
 /// Seconds over which a wheel's load is eased along its line.
-pub const TRAIL_LOAD_EASE_S: f32 = 1.5;
+pub const TRAIL_LOAD_EASE_S: f32 = 4.0;
 
 impl TrailKeeper {
     /// One wheel's place this frame. A wheel unseen for longer than

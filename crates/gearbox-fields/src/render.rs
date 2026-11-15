@@ -566,16 +566,13 @@ fn stamp_wheel_contacts(
             let line = (contact.centreline - wheels.origin) * tpm;
             let roll = contact.direction.normalize_or(Vec2::X);
             let half_width = contact.width * 0.5 * tpm;
-            // A lighter press is laid as an older one: it reads that much lighter
-            // and recovers on the same clock.
-            let pressed_at = now - (1.0 - contact.press.clamp(0.0, 1.0)) * wheels.recovery_seconds;
             for (z, x0, x1) in trample::rows(from, to, half_width, IVec2::ZERO, corner) {
                 let data: Vec<u16> = (x0..=x1)
                     .flat_map(|x| {
                         let at = IVec2::new(x, z);
                         let depth = trample::inside(at.as_vec2(), from, to, half_width);
                         let kept = if depth > -EDGE_REACH_TEXELS {
-                            let [time, packed] = trample_texel(pressed_at, roll, depth, contact.scrub);
+                            let [time, packed] = trample_texel(now, roll, depth, contact.scrub);
                             // How far along the track, from the machine's rolled
                             // distance, never from a projection with a lever arm.
                             let [along, place] = if field.tread {
