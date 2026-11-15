@@ -525,6 +525,33 @@ def predicted(obs):
     return (1.0, mx, my, sd, sd)
 
 
+class Sensed:
+    """Obstacles as the controllers see them: from positions alone, each
+    `observe` folding a frame into an `ondrive.ObstacleTracker` that keeps a
+    velocity and spread per obstacle. `ONDRIVE_LAB_NOISE` adds that many
+    metres of Gaussian noise to every position; `ONDRIVE_LAB_TRUTH=1` gives
+    the simulator's own velocities instead."""
+
+    def __init__(self):
+        self.truth = os.environ.get("ONDRIVE_LAB_TRUTH") == "1"
+        self.noise = float(os.environ.get("ONDRIVE_LAB_NOISE", "0") or 0.0)
+        self.rng = random.Random(17)
+        self.tracker = ondrive.ObstacleTracker({"horizon_steps": PRED_STEPS, "step": PRED_DT})
+
+    def observe(self, time: float, obs) -> "ondrive.World":
+        """The world for the frame at `time` with obstacles `obs`, each
+        `(x, y, vx, vy, radius)` from the simulator."""
+        world = ondrive.World()
+        if self.truth:
+            for i, o in enumerate(obs):
+                world.add_obstacle(i, o[4], [predicted(o)], dt=PRED_DT)
+            return world
+        jitter = (lambda: self.rng.gauss(0.0, self.noise)) if self.noise > 0 else (lambda: 0.0)
+        self.tracker.update(time, [(i, o[0] + jitter(), o[1] + jitter(), o[4]) for i, o in enumerate(obs)])
+        self.tracker.fill(world)
+        return world
+
+
 def send(machine, v: float, w: float):
     """`cmd_vel` that survives one dropped call: the next tick sends again."""
     try:
@@ -585,6 +612,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
     ref = Reference(densify(pts, 0.1), sc.closed)
 
     t = tracker_for(kind, m, sc, params)
+    sensed = Sensed()
     if sc.goal:
         gx, gy, gyaw = sc.goal
         t.set_goal(ondrive.Goal(target_pose=((ox + gx, oy + gy, 0.0), gyaw), tolerance_position=0.25 * m.scale, tolerance_orientation=0.25))
@@ -629,7 +657,6 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
         if st is None:
             time.sleep(TICK)
             continue
-        world = ondrive.World()
         obs_now = [(x, y, 0.0, 0.0, r) for x, y, r in statics]
         for mv in movers:
             ist = mv["machine"].state()
@@ -648,8 +675,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
             ivy = ist.vx * math.sin(ist.heading_rad)
             obs_now.append((mx0 + ist.x, my0 + ist.y, ivx, ivy, 0.6))
         marks.append(("movers", time.time()))
-        for i, o in enumerate(obs_now):
-            world.add_obstacle(i, o[4], [predicted(o)], dt=PRED_DT)
+        world = sensed.observe(now - t0, obs_now)
         clears = [box_clearance(st.x, st.y, st.heading_rad, m.length, m.width, o[0], o[1], o[4], m.body_offset) for o in obs_now]
         now_clear = min(clears, default=float("inf"))
         near = obs_now[clears.index(now_clear)] if clears else None

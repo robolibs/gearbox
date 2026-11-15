@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / ".python-packages")
 
 import ondrive  # noqa: E402
 from ondrive_lab import (  # noqa: E402
-    CONTROLLERS, MACHINES, PRED_DT, TICK, Reference, box_clearance, densify, predicted, scenario, start_heading, tracker_for,
+    CONTROLLERS, MACHINES, TICK, Reference, Sensed, box_clearance, densify, scenario, start_heading, tracker_for,
     wrap,
 )
 
@@ -84,6 +84,7 @@ def run(mname: str, kind: str, sname: str, verbose: bool, params: dict | None = 
     path.smoothen(0.2 * max(1.0, m.scale ** 0.5))
     ref = Reference(densify(pts, 0.1), sc.closed)
     t = tracker_for(kind, m, sc, params or {})
+    sensed = Sensed()
     if sc.goal:
         gx, gy, gyaw = sc.goal
         t.set_goal(ondrive.Goal(target_pose=((gx, gy, 0.0), gyaw), tolerance_position=0.25 * m.scale, tolerance_orientation=0.25))
@@ -109,9 +110,7 @@ def run(mname: str, kind: str, sname: str, verbose: bool, params: dict | None = 
             vx, vy = speed * math.cos(iyaw), speed * math.sin(iyaw)
             obs.append((ix, iy, vx, vy, 0.6))
             mv["at"] = [ix + vx * TICK, iy + vy * TICK, iyaw]
-        world = ondrive.World()
-        for i, o in enumerate(obs):
-            world.add_obstacle(i, o[4], [predicted(o)], dt=PRED_DT)
+        world = sensed.observe(time_s, obs)
         now_clear = min((box_clearance(plant.x, plant.y, plant.yaw, m.length, m.width, o[0], o[1], o[4], m.body_offset) for o in obs),
                         default=float("inf"))
         clear = min(clear, now_clear)
