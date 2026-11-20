@@ -467,6 +467,64 @@ MEASUREMENT_WIDTH = {
 }
 
 
+@_pod(
+    "gearbox.tf.v1",
+    "<QQd10I",
+    (
+        "generation", "tick", "sim_time_s",
+        "translation_offset", "translation_len",
+        "rotation_offset", "rotation_len",
+        "parents_offset", "parents_len",
+        "children_offset", "children_len",
+        "props_offset", "props_len",
+    ),
+    payload="payload",
+)
+class Tf:
+    generation: int = 0
+    tick: int = 0
+    sim_time_s: float = 0.0
+    translation_offset: int = 0
+    translation_len: int = 0
+    rotation_offset: int = 0
+    rotation_len: int = 0
+    parents_offset: int = 0
+    parents_len: int = 0
+    children_offset: int = 0
+    children_len: int = 0
+    props_offset: int = 0
+    props_len: int = 0
+    payload: bytes = b""
+
+    def section(self, name: str) -> bytes:
+        at = getattr(self, f"{name}_offset")
+        return self.payload[at : at + getattr(self, f"{name}_len")]
+
+    @property
+    def props(self) -> dict[str, str]:
+        return unpack_map(self.section("props"))
+
+    def edges(self) -> list[dict]:
+        parents = [s for s in self.section("parents").decode("utf-8", errors="replace").splitlines() if s]
+        children = [s for s in self.section("children").decode("utf-8", errors="replace").splitlines() if s]
+        tr_raw = self.section("translation")
+        rot_raw = self.section("rotation")
+        n = min(len(parents), len(children), len(tr_raw) // 24, len(rot_raw) // 32)
+        if n == 0:
+            return []
+        tr = struct.unpack(f"<{n * 3}d", tr_raw[: n * 24])
+        rot = struct.unpack(f"<{n * 4}d", rot_raw[: n * 32])
+        out = []
+        for i in range(n):
+            out.append({
+                "parent": parents[i],
+                "child": children[i],
+                "x": tr[3 * i], "y": tr[3 * i + 1], "z": tr[3 * i + 2],
+                "qw": rot[4 * i], "qx": rot[4 * i + 1], "qy": rot[4 * i + 2], "qz": rot[4 * i + 3],
+            })
+        return out
+
+
 @_pod("datapod.imu.v1", "<10d", ("wx", "wy", "wz", "ax", "ay", "az", "qw", "qx", "qy", "qz"))
 class Imu:
     wx: float = 0.0
@@ -730,21 +788,26 @@ class SensorStream:
             self._lidar_hits += chunk.hits
             self._lidar_received += cnt
         if chunk.is_last:
-            sweep = LidarSweep(
-                link=self.link,
-                sim_time_s=chunk.sim_time_s,
-                sample=chunk.sample,
-                rows=chunk.rows,
-                cols=chunk.cols,
-                hits=self._lidar_hits,
-                max_range_m=chunk.max_range_m,
-                theta_min=chunk.theta_min,
-                theta_max=chunk.theta_max,
-                phi_min=chunk.phi_min,
-                phi_max=chunk.phi_max,
-                ranges_bytes=bytes(self._lidar_ranges),
-                points_bytes=bytes(self._lidar_points),
-                props=chunk.props,
+            complete = self._lidar_received == total
+            sweep = (
+                LidarSweep(
+                    link=self.link,
+                    sim_time_s=chunk.sim_time_s,
+                    sample=chunk.sample,
+                    rows=chunk.rows,
+                    cols=chunk.cols,
+                    hits=self._lidar_hits,
+                    max_range_m=chunk.max_range_m,
+                    theta_min=chunk.theta_min,
+                    theta_max=chunk.theta_max,
+                    phi_min=chunk.phi_min,
+                    phi_max=chunk.phi_max,
+                    ranges_bytes=bytes(self._lidar_ranges),
+                    points_bytes=bytes(self._lidar_points),
+                    props=chunk.props,
+                )
+                if complete
+                else None
             )
             self._lidar_sample = None
             return sweep
@@ -771,6 +834,8 @@ class SensorStream:
         self._cam_bufs[chunk.channel] = (chunk.sample, w, h, buf, received)
         if chunk.is_last:
             self._cam_bufs.pop(chunk.channel, None)
+            if received < h:
+                return None
             return CameraImage(
                 link=self.link,
                 sim_time_s=chunk.sim_time_s,
@@ -1222,6 +1287,24 @@ class Machine:
             if time.time() >= deadline:
                 return None
             time.sleep(0.002)
+
+    def tf_latest(self) -> Tf | None:
+        """Drain `/tf` and return the newest `gearbox.tf.v1` snapshot, or None."""
+        if getattr(self, "_tf_sub", None) is None:
+            self._tf_sub = self.gb.subscribe(self.addr, self._topic("tf"), latest=True)
+        latest: Tf | None = None
+        for _ in range(32):
+            try:
+                msg = self._tf_sub.take_message()
+            except RuntimeError as err:
+                if "lagged" in str(err):
+                    continue
+                raise
+            if msg is None:
+                break
+            if msg.type_hash == Tf.TYPE_HASH:
+                latest = msg.decode(Tf)
+        return latest
 
     def links(self) -> list[dict]:
         """The link tree, base_link first: name, parent, role, prim, offset."""

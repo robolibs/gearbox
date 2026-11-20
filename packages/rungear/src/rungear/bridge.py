@@ -1,15 +1,15 @@
 """Peerbus shared-memory -> Rerun bridge for Gearbox simulators.
 
 Subscribes directly to Gearbox host and machine topics over native `peerbus`
-shared memory (via `gearbox_client`) and logs:
+shared memory (via `gearbox_client`) and logs everything onto one synchronized
+`sim_time` timeline:
   - Live machine root poses + trajectories (`world/<machine>`)
-  - Full static + dynamic `/links` & `/tf` transform hierarchy
+  - Full static + dynamic `/links` & `/tf` (`gearbox.tf.v1`) transform hierarchy
   - LiDAR sweeps (`Points3D` colored by height or range in sensor TF frame)
-  - Cameras (`Pinhole` frustum + `Image` RGB + `DepthImage` + `Boxes2D` recognition)
+  - Cameras (`Pinhole` frustum + `Image` RGB + 2D Turbo `DepthImage` + `Boxes2D`)
   - Radar (`Points3D` targets + `Arrows3D` radial velocity vectors)
-  - IMU, GPS (`GeoPoints` + scalars), Distance (`Arrows3D` + scalars),
-    Light, Climate, Touch, Position, Compass, InertialUnit, Accelerometer,
-    Gyro, and Receiver telemetry.
+  - IMU, GPS, Distance (`Arrows3D` + scalars), Light, Climate, Touch, Position,
+    Compass, InertialUnit, Accelerometer, Gyro, and Receiver telemetry.
 """
 
 from __future__ import annotations
@@ -55,9 +55,6 @@ from gearbox_client import (  # noqa: E402
 )
 
 
-# ─── Turbo colormap LUT (256 × RGB u8) for LiDAR height/range coloring ──────
-
-
 def _build_turbo_lut() -> np.ndarray:
     t = np.linspace(0.0, 1.0, 256, dtype=np.float32)
     r = np.clip(0.1357 + t * (4.6154 + t * (-42.6603 + t * (132.1311 + t * (-152.9424 + t * 59.2864)))), 0.0, 1.0)
@@ -93,21 +90,20 @@ class _MachineBinding:
         self.cfg = cfg
         self.root = f"world/{self.id}"
         self.link_paths: dict[str, str] = {}
-        self.link_by_index: dict[int, str] = {}
         self.sensor_streams: dict[str, SensorStream] = {}
         self.sensor_kinds: dict[str, str] = {}
-        self.sensor_hz: dict[str, collections.deque[float]] = {}
         self.pinhole_logged: set[tuple[str, int, int]] = set()
+        self.series_styled: set[str] = set()
         self.trajectory: collections.deque[list[float]] = collections.deque(maxlen=cfg.trajectory_max_points)
-        self.last_state_log: float = 0.0
+        self.last_sim_time_s: float | None = None
+        self.last_state_wall: float = 0.0
+        self.last_tf_wall: float = 0.0
         self.tf_enabled = False
         self._init_links_and_sensors()
 
     def _init_links_and_sensors(self) -> None:
         links = self.machine.links()
         by_name = {l["name"]: l for l in links if l.get("name")}
-        by_index = {l["index"]: l["name"] for l in links if l.get("name") and "index" in l}
-        self.link_by_index = by_index
 
         def resolve_path(name: str, seen: set[str] | None = None) -> str:
             if name in self.link_paths:
@@ -160,13 +156,21 @@ class _MachineBinding:
                 continue
             try:
                 self.sensor_streams[name] = self.machine.subscribe_sensor(name)
-                self.sensor_hz[name] = collections.deque(maxlen=30)
                 print(f"[rungear] subscribed {self.id}/sensors/{name} (peerbus SHM)", flush=True)
             except Exception as err:  # noqa: BLE001
                 print(f"[rungear] failed to subscribe {self.id}/sensors/{name}: {err}", file=sys.stderr)
 
     def entity_for_link(self, link: str) -> str:
         return self.link_paths.get(link) or f"{self.root}/{link}"
+
+    def style_series(self, path: str, names: list[str], colors: list[list[int]] | None = None) -> None:
+        if path in self.series_styled:
+            return
+        self.series_styled.add(path)
+        kwargs = {"names": names}
+        if colors:
+            kwargs["colors"] = colors
+        rr.log(path, rr.SeriesLines(**kwargs), static=True)
 
     def close(self) -> None:
         for stream in self.sensor_streams.values():
@@ -250,29 +254,43 @@ class RungearBridge:
             self._maybe_send_blueprint()
 
     def _maybe_send_blueprint(self) -> None:
-        cam_paths: list[tuple[str, str]] = []
+        cam_entries: list[tuple[str, str, str]] = []
+        plot_tabs: list[rrb.TimeSeriesView] = []
         sig_items: list[tuple[str, tuple[str, ...]]] = []
+
         for mid in sorted(self.bindings):
             b = self.bindings[mid]
             kinds = tuple(sorted(f"{k}:{v}" for k, v in b.sensor_kinds.items()))
             sig_items.append((mid, kinds))
             for link, kind in sorted(b.sensor_kinds.items()):
                 if kind == "camera":
-                    cam_paths.append((f"{mid}/{link}", b.entity_for_link(link)))
+                    cam_entries.append((f"{mid}/{link}", b.entity_for_link(link), f"cameras/{mid}/{link}/depth"))
+                elif kind == "imu":
+                    plot_tabs.append(rrb.TimeSeriesView(name=f"{mid} IMU Accel", origin=f"telemetry/{mid}/{link}/accel"))
+                    plot_tabs.append(rrb.TimeSeriesView(name=f"{mid} IMU Gyro", origin=f"telemetry/{mid}/{link}/gyro"))
+                elif kind == "lidar":
+                    plot_tabs.append(rrb.TimeSeriesView(name=f"{mid} LiDAR Hits", origin=f"telemetry/{mid}/{link}"))
+                elif kind == "gps":
+                    plot_tabs.append(rrb.TimeSeriesView(name=f"{mid} GPS", origin=f"telemetry/{mid}/{link}"))
+                else:
+                    plot_tabs.append(rrb.TimeSeriesView(name=f"{mid} {link}", origin=f"telemetry/{mid}/{link}"))
+            plot_tabs.append(rrb.TimeSeriesView(name=f"{mid} Speed", origin=f"telemetry/{mid}/state"))
+
         sig = tuple(sig_items)
         if sig == self._blueprint_sig or not self.bindings:
             return
         self._blueprint_sig = sig
 
         right_views = []
-        for label, origin in cam_paths[:4]:
+        for label, color_origin, depth_origin in cam_entries[:4]:
             right_views.append(
                 rrb.Horizontal(
-                    rrb.Spatial2DView(name=f"{label} RGB", origin=f"{origin}/color"),
-                    rrb.Spatial2DView(name=f"{label} Depth", origin=f"{origin}/depth"),
+                    rrb.Spatial2DView(name=f"{label} RGB", origin=f"{color_origin}/color"),
+                    rrb.Spatial2DView(name=f"{label} Depth", origin=depth_origin),
                 )
             )
-        right_views.append(rrb.TimeSeriesView(name="Telemetry", origin="telemetry"))
+        if plot_tabs:
+            right_views.append(rrb.Tabs(*plot_tabs) if len(plot_tabs) > 1 else plot_tabs[0])
 
         layout = rrb.Horizontal(
             rrb.Spatial3DView(name="3D World", origin="world"),
@@ -309,19 +327,66 @@ class RungearBridge:
         finally:
             self._close_all()
 
+    def _set_sim_time(self, b: _MachineBinding, sim_time_s: float) -> None:
+        b.last_sim_time_s = sim_time_s
+        rr.set_time("sim_time", duration=sim_time_s)
+
     def _poll_machine(self, b: _MachineBinding, now: float) -> bool:
         did_work = False
 
-        # 1. Machine root pose + trajectory
-        if self.cfg.enable_state and now - b.last_state_log >= 0.03:
+        # 1. Live /tf dynamic link poses (gearbox.tf.v1 carries exact sim_time_s)
+        if self.cfg.enable_tf and b.tf_enabled and now - b.last_tf_wall >= 0.033:
+            try:
+                tf = b.machine.tf_latest()
+            except Exception as err:  # noqa: BLE001
+                print(f"[rungear] {b.id}/tf error: {err}", file=sys.stderr)
+                tf = None
+            if tf is not None:
+                b.last_tf_wall = now
+                did_work = True
+                self._set_sim_time(b, tf.sim_time_s)
+                for edge in tf.edges():
+                    child = edge["child"]
+                    # Skip the synthetic inverse `chassis -> base_link` edge;
+                    # `world/<machine>/base_link/chassis` is already rooted by MachineState.
+                    if child == "base_link" or child not in b.link_paths:
+                        continue
+                    rr.log(
+                        b.link_paths[child],
+                        rr.Transform3D(
+                            translation=[edge["x"], edge["y"], edge["z"]],
+                            quaternion=rr.Quaternion(xyzw=[edge["qx"], edge["qy"], edge["qz"], edge["qw"]]),
+                        ),
+                    )
+
+        # 2. Authored sensor streams (all share sim_time)
+        blueprint_dirty = False
+        for link, stream in list(b.sensor_streams.items()):
+            try:
+                events = stream.drain(limit=128)
+            except Exception as err:  # noqa: BLE001
+                print(f"[rungear] {b.id}/{link} drain error: {err}", file=sys.stderr)
+                continue
+            if not events:
+                continue
+            did_work = True
+            for kind, payload in events:
+                prev_kind = b.sensor_kinds.get(link)
+                logged_kind = self._log_sensor(b, link, kind, payload)
+                if logged_kind and logged_kind != prev_kind:
+                    b.sensor_kinds[link] = logged_kind
+                    blueprint_dirty = True
+
+        # 3. Machine root pose + trajectory (aligned to the same sim_time timeline)
+        if self.cfg.enable_state and b.last_sim_time_s is not None and now - b.last_state_wall >= 0.033:
             try:
                 st = b.machine.state(wait=0.0)
             except Exception:  # noqa: BLE001
                 st = None
             if st is not None:
-                b.last_state_log = now
+                b.last_state_wall = now
                 did_work = True
-                rr.set_time("wall_time", timestamp=time.time())
+                rr.set_time("sim_time", duration=b.last_sim_time_s)
                 rr.log(
                     b.root,
                     rr.Transform3D(
@@ -339,74 +404,35 @@ class RungearBridge:
                         )
                 rr.log(f"telemetry/{b.id}/state/speed_mps", rr.Scalars(st.linear_speed))
 
-        # 2. Live /tf dynamic joint/link poses
-        if self.cfg.enable_tf and b.tf_enabled:
-            for _ in range(64):
-                try:
-                    tf = b.machine.tf_next(timeout=0.0)
-                except Exception:  # noqa: BLE001
-                    break
-                if tf is None:
-                    break
-                did_work = True
-                link = tf.get("name") or b.link_by_index.get(tf.get("index", -1))
-                if not link:
-                    continue
-                rr.log(
-                    b.entity_for_link(link),
-                    rr.Transform3D(
-                        translation=[tf["x"], tf["y"], tf["z"]],
-                        quaternion=rr.Quaternion(xyzw=[tf["qx"], tf["qy"], tf["qz"], tf["qw"]]),
-                    ),
-                )
-
-        # 3. Authored sensor streams
-        blueprint_dirty = False
-        for link, stream in list(b.sensor_streams.items()):
-            try:
-                events = stream.drain(limit=128)
-            except Exception as err:  # noqa: BLE001
-                print(f"[rungear] {b.id}/{link} drain error: {err}", file=sys.stderr)
-                continue
-            if not events:
-                continue
-            did_work = True
-            for kind, payload in events:
-                prev_kind = b.sensor_kinds.get(link)
-                logged_kind = self._log_sensor(b, link, kind, payload, now)
-                if logged_kind and logged_kind != prev_kind:
-                    b.sensor_kinds[link] = logged_kind
-                    blueprint_dirty = True
-
         if blueprint_dirty:
             self._maybe_send_blueprint()
 
         return did_work
 
-    def _log_sensor(self, b: _MachineBinding, link: str, kind: str, payload: object, now: float) -> str | None:
+    def _log_sensor(self, b: _MachineBinding, link: str, kind: str, payload: object) -> str | None:
         entity = b.entity_for_link(link)
         tbase = f"telemetry/{b.id}/{link}"
 
         if kind == "imu":
             assert isinstance(payload, Imu)
-            rr.set_time("wall_time", timestamp=time.time())
-            rr.log(f"{tbase}/accel/x", rr.Scalars(payload.ax))
-            rr.log(f"{tbase}/accel/y", rr.Scalars(payload.ay))
-            rr.log(f"{tbase}/accel/z", rr.Scalars(payload.az))
-            rr.log(f"{tbase}/gyro/x", rr.Scalars(payload.wx))
-            rr.log(f"{tbase}/gyro/y", rr.Scalars(payload.wy))
-            rr.log(f"{tbase}/gyro/z", rr.Scalars(payload.wz))
+            if b.last_sim_time_s is None:
+                return "imu"
+            rr.set_time("sim_time", duration=b.last_sim_time_s)
+            b.style_series(f"{tbase}/accel", ["ax", "ay", "az"], [[213, 94, 0], [0, 158, 115], [86, 180, 233]])
+            b.style_series(f"{tbase}/gyro", ["wx", "wy", "wz"], [[213, 94, 0], [0, 158, 115], [86, 180, 233]])
+            rr.log(f"{tbase}/accel", rr.Scalars([payload.ax, payload.ay, payload.az]))
+            rr.log(f"{tbase}/gyro", rr.Scalars([payload.wx, payload.wy, payload.wz]))
             return "imu"
 
         if kind == "lidar":
             if not self.cfg.enable_lidar:
                 return "lidar"
             assert isinstance(payload, LidarSweep)
-            rr.set_time("sim_time", duration=payload.sim_time_s)
+            self._set_sim_time(b, payload.sim_time_s)
             total = payload.rows * payload.cols
             ranges = np.frombuffer(payload.ranges_bytes, dtype="<f4", count=total)
             points = np.frombuffer(payload.points_bytes, dtype="<f4", count=total * 3).reshape((total, 3))
-            valid = np.isfinite(ranges) & np.all(np.isfinite(points), axis=1)
+            valid = np.isfinite(ranges) & (ranges > 0.0) & np.all(np.isfinite(points), axis=1)
             pts = points[valid]
             rng = ranges[valid]
             if len(pts) > 0:
@@ -420,14 +446,14 @@ class RungearBridge:
                     f"{entity}/points",
                     rr.Points3D(pts, colors=colors, radii=self.cfg.lidar_point_radius),
                 )
-            rr.log(f"{tbase}/hits", rr.Scalars(float(payload.hits)))
+            rr.log(f"{tbase}/hits", rr.Scalars(float(len(pts))))
             return "lidar"
 
         if kind == "camera":
             if not self.cfg.enable_cameras:
                 return "camera"
             assert isinstance(payload, CameraImage)
-            rr.set_time("sim_time", duration=payload.sim_time_s)
+            self._set_sim_time(b, payload.sim_time_s)
             pkey = (link, payload.width, payload.height)
             if pkey not in b.pinhole_logged and payload.fov_y_rad > 0.0:
                 b.pinhole_logged.add(pkey)
@@ -447,13 +473,23 @@ class RungearBridge:
                 rr.log(f"{entity}/color", rr.Image(rgba[:, :, :3]))
             elif payload.channel == CAMERA_DEPTH:
                 depths = np.frombuffer(payload.data, dtype="<f4").reshape((payload.height, payload.width)).copy()
-                depths[~np.isfinite(depths)] = 0.0
-                rr.log(f"{entity}/depth", rr.DepthImage(depths, meter=1.0, colormap="turbo"))
+                valid = np.isfinite(depths) & (depths > 0.0)
+                depths[~valid] = 0.0
+                d_lo = float(np.percentile(depths[valid], 2)) if np.any(valid) else 0.5
+                d_hi = float(min(np.percentile(depths[valid], 98), 35.0)) if np.any(valid) else 25.0
+                if d_hi <= d_lo + 0.1:
+                    d_hi = d_lo + 5.0
+                # Log depth under `cameras/...` (outside the 3D Pinhole) so 2D depth
+                # displays cleanly in Turbo without projecting a 100 m sheet over the LiDAR.
+                rr.log(
+                    f"cameras/{b.id}/{link}/depth",
+                    rr.DepthImage(depths, meter=1.0, colormap="turbo", depth_range=[d_lo, d_hi]),
+                )
             return "camera"
 
         if kind == "measurement":
             assert isinstance(payload, Measurement)
-            rr.set_time("sim_time", duration=payload.sim_time_s)
+            self._set_sim_time(b, payload.sim_time_s)
             kname = payload.kind_name
             recs = payload.records()
             props = payload.props
@@ -505,12 +541,9 @@ class RungearBridge:
 
             if kname == "gps" and recs and len(recs[0]) >= 10:
                 lat, lon, alt, east, north, up, speed = recs[0][:7]
-                if math.isfinite(lat):
-                    rr.log(f"{tbase}/latitude_deg", rr.Scalars(lat))
-                if math.isfinite(lon):
-                    rr.log(f"{tbase}/longitude_deg", rr.Scalars(lon))
-                if math.isfinite(alt):
-                    rr.log(f"{tbase}/altitude_m", rr.Scalars(alt))
+                if math.isfinite(east) and math.isfinite(north) and math.isfinite(up):
+                    b.style_series(f"{tbase}/enu_m", ["east", "north", "up"], [[213, 94, 0], [0, 158, 115], [86, 180, 233]])
+                    rr.log(f"{tbase}/enu_m", rr.Scalars([east, north, up]))
                 if math.isfinite(speed):
                     rr.log(f"{tbase}/speed_mps", rr.Scalars(speed))
                 return "gps"
@@ -526,10 +559,8 @@ class RungearBridge:
 
             if kname == "light" and recs and len(recs[0]) >= 5:
                 irr, direct, sky, sources, val = recs[0][:5]
-                rr.log(f"{tbase}/irradiance_wm2", rr.Scalars(irr))
-                rr.log(f"{tbase}/direct_wm2", rr.Scalars(direct))
-                rr.log(f"{tbase}/sky_wm2", rr.Scalars(sky))
-                rr.log(f"{tbase}/visible_sources", rr.Scalars(sources))
+                b.style_series(f"{tbase}/irradiance", ["total", "direct", "sky"])
+                rr.log(f"{tbase}/irradiance", rr.Scalars([irr, direct, sky]))
                 return "light"
 
             if kname == "climate" and recs and len(recs[0]) >= 5:
@@ -537,14 +568,11 @@ class RungearBridge:
                 rr.log(f"{tbase}/temp_c", rr.Scalars(temp))
                 rr.log(f"{tbase}/rh", rr.Scalars(rh))
                 rr.log(f"{tbase}/co2_ppm", rr.Scalars(co2))
-                rr.log(f"{tbase}/o2_kpa", rr.Scalars(o2))
-                rr.log(f"{tbase}/pressure_kpa", rr.Scalars(press))
                 return "climate"
 
             if kname == "touch" and recs and len(recs[0]) >= 6:
                 touching, contacts, force = recs[0][:3]
                 rr.log(f"{tbase}/touching", rr.Scalars(touching))
-                rr.log(f"{tbase}/contacts", rr.Scalars(contacts))
                 rr.log(f"{tbase}/force_n", rr.Scalars(force))
                 return "touch"
 
@@ -560,11 +588,10 @@ class RungearBridge:
                 rr.log(f"{tbase}/packets", rr.TextLog(f"from={sender} ch={recs[0][0]:.0f} sig={recs[0][1]:.2f} {text}"))
                 return "receiver"
 
-            # Generic fallback for accelerometer, gyro, compass, inertial_unit, actuators
             if recs:
-                for i, v in enumerate(recs[0]):
-                    if math.isfinite(v):
-                        rr.log(f"{tbase}/{kname}_{i}", rr.Scalars(v))
+                vals = [v for v in recs[0] if math.isfinite(v)]
+                if vals:
+                    rr.log(f"{tbase}/{kname}", rr.Scalars(vals))
             return kname
 
         return None
