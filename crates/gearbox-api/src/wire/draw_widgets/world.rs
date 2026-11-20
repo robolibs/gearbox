@@ -251,6 +251,64 @@ pub fn field_volume(place: &Place, ns: &str, id: &str, pose: Pose, size: [f32; 3
         .with_fill(draw_flag::FILL_SOLID).with_dash(spacing).with_color(explicit_color(color))]
 }
 
+/// What a machine ring says about its machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RingMark {
+    /// The pointer is over it.
+    Hover,
+    Selected,
+    /// The camera follows it.
+    Following,
+}
+
+impl RingMark {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Hover => "hover",
+            Self::Selected => "selected",
+            Self::Following => "following",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "hover" | "hovered" => Some(Self::Hover),
+            "selected" | "select" => Some(Self::Selected),
+            "following" | "follow" => Some(Self::Following),
+            _ => None,
+        }
+    }
+
+    /// The tint a ring takes when given none.
+    pub fn tint(self) -> u32 {
+        match self {
+            Self::Hover => rgba(220, 232, 236, 80),
+            Self::Selected | Self::Following => rgba(220, 232, 236, 140),
+        }
+    }
+}
+
+/// Smallest outer radius of a machine ring, metres.
+pub const RING_MIN_RADIUS: f32 = 0.5;
+
+/// A machine's ring on the ground, its rim `radius` metres out from
+/// `centre`; `centre` z is its height, above the terrain when draped. One
+/// [`draw_style::RING`] entity: a soft off-white band in four arcs with faint
+/// gaps, fainter when hovered, closed with a thin outer line while followed.
+/// A zero `tint` takes the mark's own.
+pub fn machine_ring(place: &Place, ns: &str, id: &str, centre: [f32; 3], radius: f32, mark: RingMark, tint: u32) -> Vec<DrawEntity> {
+    let root = path(ns, id);
+    if !finite(centre) || !radius.is_finite() || radius < RING_MIN_RADIUS {
+        return cleared(place, &root, &["ring"]);
+    }
+    let tint = if tint == 0 { mark.tint() } else { tint };
+    vec![place.put(DrawEntity::points(&root, "ring", &[centre]))
+        .with_style(draw_style::RING)
+        .with_width(2.0 * radius)
+        .with_color(explicit_color(tint))
+        .with_prop("mark", mark.name())]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,5 +501,28 @@ mod tests {
         assert_eq!(restored.color, e.color);
         store.apply(DrawEntity::clear("n/dense"), 1.0).unwrap();
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn a_machine_ring_is_one_ring_entity_carrying_its_mark() {
+        for mark in [RingMark::Hover, RingMark::Selected, RingMark::Following] {
+            assert_eq!(RingMark::parse(mark.name()), Some(mark));
+            let [ring] = <[DrawEntity; 1]>::try_from(machine_ring(&p(), "n", "m", [10.0, -4.0, 0.1], 3.0, mark, 0)).unwrap();
+            assert_eq!((ring.ns(), ring.id()), ("n/m".to_string(), "ring".to_string()));
+            assert_eq!((ring.kind, ring.style, ring.width), (draw_kind::POINTS, draw_style::RING, 6.0));
+            assert_eq!(ring.point_list(), [[10.0, -4.0, 0.1]]);
+            assert_eq!((ring.color, ring.props().get("mark").as_deref()), (mark.tint(), Some(mark.name())));
+        }
+        let red = machine_ring(&p(), "n", "m", [0.0; 3], 3.0, RingMark::Following, color::RED);
+        assert_eq!(red[0].color, color::RED);
+        assert_ne!(machine_ring(&Place::default(), "n", "m", [0.0; 3], 3.0, RingMark::Hover, 0)[0].flags & draw_flag::DRAPE, 0);
+    }
+
+    #[test]
+    fn machine_rings_clear_when_they_cannot_be_drawn() {
+        for (centre, radius) in [([f32::NAN, 0.0, 0.0], 3.0), ([0.0; 3], RING_MIN_RADIUS - 0.01), ([0.0; 3], f32::INFINITY)] {
+            let parts = machine_ring(&p(), "n", "m", centre, radius, RingMark::Following, 0);
+            assert_eq!(parts.iter().map(|e| (e.op, e.id())).collect::<Vec<_>>(), [(draw_op::DELETE, "ring".to_string())]);
+        }
     }
 }

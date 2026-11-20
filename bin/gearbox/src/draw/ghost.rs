@@ -141,6 +141,8 @@ pub struct GhostSpec {
     pub glow: f32,
     pub pulse: f32,
     pub fade: f32,
+    /// Opacity of every copy, 0..1.
+    pub opacity: f32,
     pub phase: f32,
 }
 
@@ -182,7 +184,7 @@ impl GhostPalette {
             1.0
         };
         let mut color = self.entries[self.poses[index]];
-        color.w *= spec.fade + (1.0 - spec.fade) * share;
+        color.w *= (spec.fade + (1.0 - spec.fade) * share) * spec.opacity;
         GhostParams {
             color,
             fx: Vec4::new(
@@ -431,6 +433,7 @@ mod tests {
             glow: 0.6,
             pulse: 0.5,
             fade: 0.15,
+            opacity: 1.0,
             phase: 0.23,
             blur: 0.0,
         }

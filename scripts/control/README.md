@@ -85,6 +85,11 @@ and `urgency` take the style's default when left out (or 0) and switch off
 below 0; `flat=True` lays lines and points on the frame's XY plane and
 `additive=True` adds them as light.
 
+Every drawing is shown at half opacity unless it says otherwise: `opacity`
+(`--opacity` on the CLI, `with_opacity` in Rust) takes 0..1 for the whole
+drawing, its labels and panel included; left out or 0 is `0.5`, `1` is fully
+opaque.
+
 Every drawing also accepts `blur=0..1`, independently of color, opacity and
 glow: `0` is clear, `0.5` is partial frost and `1` is full frost. Omission
 preserves the existing finish (world drawings clear, panels frosted). The

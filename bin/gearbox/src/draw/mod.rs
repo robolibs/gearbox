@@ -104,6 +104,25 @@ struct Part {
     entity: Entity,
     mesh: Handle<Mesh>,
     material: UntypedAssetId,
+    layer: usize,
+}
+
+/// The render layer of an entity's meshes: the viewer's own overlay for
+/// view-only draws, else the one captures keep.
+fn layer_of(e: &DrawEntity) -> usize {
+    if e.flags & draw_flag::VIEW_ONLY != 0 {
+        crate::viewer::recorder::OVERLAY_LAYER
+    } else {
+        DRAW_LAYER
+    }
+}
+
+/// Moves a kept part onto `layer`.
+fn relayer(commands: &mut Commands, slot: &mut Option<Part>, layer: usize) {
+    if let Some(part) = slot.as_mut().filter(|part| part.layer != layer) {
+        part.layer = layer;
+        commands.entity(part.entity).insert(RenderLayers::layer(layer));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -173,6 +192,8 @@ struct Visual {
     heat_material: Option<Handle<heat::HeatMaterial>>,
     heat_geometry: u64,
     labels: Vec<LabelSpec>,
+    /// The drawing's opacity, which its labels and panel take too.
+    opacity: f32,
     /// A panel's chart and its anchor in the root's space.
     panel: Option<(PanelChart, Vec3)>,
     /// The machine whose TF tree this entity switches on.
@@ -185,8 +206,8 @@ struct Visual {
 
 #[derive(Default)]
 struct MaterialCache {
-    strokes: HashMap<(bool, bool, u8), Handle<StrokeMaterial>>,
-    surfaces: HashMap<(bool, bool, bool, bool, u8), Handle<SurfaceMaterial>>,
+    strokes: HashMap<(bool, bool, u8, u8), Handle<StrokeMaterial>>,
+    surfaces: HashMap<(bool, bool, bool, bool, u8, u8), Handle<SurfaceMaterial>>,
 }
 
 #[derive(Resource, Default)]
@@ -220,6 +241,7 @@ fn content_hash(e: &DrawEntity) -> u64 {
         e.beam_height,
         e.fade,
         e.urgency,
+        e.opacity,
         e.vmin,
         e.vmax,
         e.quant,
@@ -379,6 +401,7 @@ fn sync_draws(
             heat_material: None,
             heat_geometry: 0,
             labels: Vec::new(),
+            opacity: 1.0,
             panel: None,
             tf: None,
             ghost: None,
@@ -403,6 +426,7 @@ fn sync_draws(
         visual.placement.update(item);
         visual.compact = compact;
         visual.labels = built.labels;
+        visual.opacity = e.shown_opacity();
         visual.panel = (e.kind == draw_kind::PANEL).then(|| {
             (
                 PanelChart::of(e),
@@ -426,6 +450,7 @@ fn sync_draws(
                 glow: fx.glow,
                 pulse: fx.pulse_hz,
                 fade: fx.fade,
+                opacity: visual::scene_opacity(e.shown_opacity()),
                 phase: 0.0,
                 blur: visual::blur(e, 0.0),
             }
@@ -433,16 +458,18 @@ fn sync_draws(
 
         let on_top = on_top || built.on_top;
         let cache = &mut visuals.materials;
-        let splat = built.splat;
+        let opacity_key = visual::opacity_key(e);
+        let opacity = visual::scene_opacity(opacity_key as f32 / 255.0);
+        let splat = built.splat && opacity_key == u8::MAX;
         let blur_key = visual::blur_key(e);
         let blur = blur_key as f32 / 255.0;
         let stroke = (!built.strokes.is_empty()).then(|| {
             let material = cache
                 .strokes
-                .entry((on_top, splat, blur_key))
+                .entry((on_top, splat, blur_key, opacity_key))
                 .or_insert_with(|| {
                     strokes.add(StrokeMaterial {
-                        unused: Vec4::new(blur, 0.0, 0.0, 0.0),
+                        finish: Vec4::new(blur, opacity, 0.0, 0.0),
                         lut: luts.agx.clone(),
                         on_top,
                         splat,
@@ -454,12 +481,13 @@ fn sync_draws(
         let fill = (!built.fill.is_empty()).then(|| {
             let translucent = built.fill.translucent();
             let double_sided = built.double_sided || translucent;
+            let translucent = translucent || opacity_key < u8::MAX;
             let material = cache
                 .surfaces
-                .entry((on_top, translucent, double_sided, built.shaded, blur_key))
+                .entry((on_top, translucent, double_sided, built.shaded, blur_key, opacity_key))
                 .or_insert_with(|| {
                     surfaces.add(SurfaceMaterial {
-                        flags: Vec4::new(built.shaded as u32 as f32, blur, 0.0, 0.0),
+                        flags: Vec4::new(built.shaded as u32 as f32, blur, opacity, 0.0),
                         lut: luts.agx.clone(),
                         on_top,
                         translucent,
@@ -470,9 +498,10 @@ fn sync_draws(
             (built.fill.into_mesh(), material)
         });
         let root = visual.root;
+        let layer = layer_of(e);
         let parts = &mut visual.parts;
-        set_part(&mut commands, &mut parts[0], root, fill, &mut meshes);
-        set_part(&mut commands, &mut parts[1], root, stroke, &mut meshes);
+        set_part(&mut commands, &mut parts[0], root, fill, &mut meshes, layer);
+        set_part(&mut commands, &mut parts[1], root, stroke, &mut meshes, layer);
         let grid = (e.kind == draw_kind::GRID)
             .then(|| heat::images(&expanded))
             .flatten();
@@ -505,9 +534,10 @@ fn sync_draws(
                 let geometry = heat::geometry_key(&expanded, place);
                 if visual.heat_geometry != geometry || visual.heat.is_none() {
                     let mesh = heat::mesh(&expanded, ground).map(|m| (m, material));
-                    set_part(&mut commands, &mut visual.heat, root, mesh, &mut meshes);
+                    set_part(&mut commands, &mut visual.heat, root, mesh, &mut meshes, layer);
                     visual.heat_geometry = geometry;
                 }
+                relayer(&mut commands, &mut visual.heat, layer);
             }
             None => {
                 set_part::<heat::HeatMaterial>(
@@ -516,6 +546,7 @@ fn sync_draws(
                     root,
                     None,
                     &mut meshes,
+                    layer,
                 );
                 visual.heat_material = None;
                 visual.heat_geometry = 0;
@@ -531,7 +562,9 @@ fn set_part<M: Material>(
     root: Entity,
     content: Option<(Mesh, Handle<M>)>,
     meshes: &mut Assets<Mesh>,
+    layer: usize,
 ) {
+    relayer(commands, slot, layer);
     match (content, slot.as_mut()) {
         (None, Some(part)) => {
             commands.entity(part.entity).try_despawn();
@@ -559,7 +592,7 @@ fn set_part<M: Material>(
                     NoFrustumCulling,
                     NotShadowCaster,
                     NotShadowReceiver,
-                    RenderLayers::layer(DRAW_LAYER),
+                    RenderLayers::layer(layer),
                     ChildOf(root),
                 ))
                 .id();
@@ -567,6 +600,7 @@ fn set_part<M: Material>(
                 entity,
                 mesh: handle,
                 material: material_id,
+                layer,
             });
         }
     }
@@ -936,7 +970,7 @@ fn project_draw_labels(
                     key: key.clone(),
                     chart: chart.clone(),
                     at: None,
-                    opacity: 1.0,
+                    opacity: visual.opacity,
                 });
                 continue;
             }
@@ -947,7 +981,8 @@ fn project_draw_labels(
             let depth = -view_from_world.transform_point3(world).z;
             let fade_end = chart.max_distance.unwrap_or(PANEL_FADE_M.1);
             let fade_start = fade_end * PANEL_FADE_M.0 / PANEL_FADE_M.1;
-            let opacity = 1.0 - ((depth - fade_start) / (fade_end - fade_start)).clamp(0.0, 1.0);
+            let opacity = (1.0 - ((depth - fade_start) / (fade_end - fade_start)).clamp(0.0, 1.0))
+                * visual.opacity;
             if opacity > 0.0 && depth > 0.0 {
                 panels.0.push(DrawPanel {
                     key: key.clone(),
@@ -996,7 +1031,8 @@ fn project_draw_labels(
                     label.size * size.y / (2.0 * (0.5 * f).tan() * depth.max(1e-3))
                 })
             };
-            let opacity = visual::label_opacity(depth, label.annotation.max_distance);
+            let opacity =
+                visual::label_opacity(depth, label.annotation.max_distance) * visual.opacity;
             if depth <= 0.0 || size_px < MIN_LABEL_PX || opacity <= 0.0 {
                 continue;
             }

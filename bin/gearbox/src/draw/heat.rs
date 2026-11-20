@@ -35,6 +35,7 @@ const HOT_GLOW: f32 = 0.08;
 
 #[derive(Clone, Copy, Debug, ShaderType)]
 pub struct HeatParams {
+    /// Frost strength, opacity, unused, unused.
     pub frost: Vec4,
     /// Texture columns and rows, contour spacing in normalised value (0
     /// none), glow.
@@ -301,7 +302,7 @@ pub fn params(e: &DrawEntity, size: UVec2) -> HeatParams {
     };
     let glow = super::visual::effect(e.glow, super::visual::defaults(draw_style::HEAT).glow);
     HeatParams {
-        frost: Vec4::new(super::visual::blur(e, 0.0), 0.0, 0.0, 0.0),
+        frost: Vec4::new(super::visual::blur(e, 0.0), super::visual::scene_opacity(e.shown_opacity()), 0.0, 0.0),
         grid: Vec4::new(size.x as f32, size.y as f32, contour, glow),
         look: Vec4::new(
             FILL_ALPHA,

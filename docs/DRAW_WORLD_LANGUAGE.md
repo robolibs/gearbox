@@ -40,7 +40,7 @@ The sections below record the earlier extension's API and correctness work,
 not acceptance of its appearance. Preserve useful geometry/lifecycle fixes
 while replacing the rejected styling according to the Halo specification.
 
-The extension adds five public helpers to the Rust, Python and CLI drawing
+The extension adds six public helpers to the Rust, Python and CLI drawing
 APIs, composed from existing retained entity kinds:
 
 | Helper | World geometry | Caller owns |
@@ -50,6 +50,17 @@ APIs, composed from existing retained entity kinds:
 | `destination` | Broken ground rings, upright open-diamond sign, leader and label | Pose, radius, label and color |
 | `clearance_box` | Broken 3D corner brackets and optional label | Center pose and full XYZ extents |
 | `field_volume` | Transparent rectangular grid boundary | Pose, full XYZ extents, grid spacing and color |
+| `machine_ring` | One `ring` style band on the ground in four strong arcs with faint gaps in a soft off-white, fainter for `hover`; `following` closes the gaps and adds a thin outer line | Centre, outer radius, mark and color |
+
+The viewer draws its own machine rings with `machine_ring` under
+`gearbox/rings/<machine>`: a ring round the followed machine always, round the
+selected and hovered ones while the simulation runs. They carry `VIEW_ONLY`, so
+captures and recordings leave them out. Three quick clicks on a machine in the
+view toggle the camera following it.
+
+Every drawing, these helpers and the viewer's rings included, is shown at half
+opacity (`DEFAULT_OPACITY`) unless it sets `opacity` in 0..1; `1` is fully
+opaque. The opacity covers the drawing's labels and panel as well.
 
 `FIELD` is an explicit style at value 20; all previous style values and the
 `gearbox.draw.v1` wire layout remain unchanged. The surface uses a filtered
@@ -84,12 +95,13 @@ gb.draw.clearance_box("robot", "bounds", (0, 0, 1.0, 0),
                       size=(2, 1, 1.8), label="Required clearance")
 gb.draw.field_volume("sensor", "coverage", (0, 0, 1.5, 0),
                      size=(4, 3, 2.5), spacing=0.75, pulse_hz=-1)
+gb.draw.machine_ring("fleet", "tractor", (12, 4, 0.1), radius=3, mark="following")
 gb.draw.clear("sensor/coverage")
 ```
 
 Rust exposes the same builders from `wire::draw_widgets`, returning entities
 for `Client::draw`. CLI commands are `terrain-marks`, `route-stations`,
-`destination`, `clearance-box` and `field-volume`; each provides `--help`.
+`destination`, `clearance-box`, `field-volume` and `machine-ring`; each provides `--help`.
 `FIELD` supports BOX and RECT only. Other primitive kinds retain PLAIN behavior.
 
 `size` for terrain marks is full symbol span; destination radius is the outer

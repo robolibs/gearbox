@@ -186,6 +186,7 @@ impl DrawStore {
             ("beam_height", &mut e.beam_height, msg.beam_height),
             ("fade", &mut e.fade, msg.fade),
             ("urgency", &mut e.urgency, msg.urgency),
+            ("opacity", &mut e.opacity, msg.opacity),
         ] {
             if takes("effects") || takes(name) {
                 *field = value;

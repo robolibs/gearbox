@@ -133,7 +133,12 @@ pub(super) fn helper_contract() -> serde_json::Value {
     items.push(p.put(E::points(ns, "payload-controls", &points)).with_radii(&[0.1, -2.0, 0.3]).with_colors(&[tint, 1, 0xff00b4e9])
         .with_color(tint).with_color2(0x40cc7733).with_style(style::POINT_GLOW).with_width(-3.0)
         .with_glow(-1.0).with_pulse(0.75).with_flow(0.5, 0.25).with_beam(1.5).with_fade(0.3).with_urgency(0.4)
+        .with_opacity(0.75)
         .with_values(&[0.0, 0.5, 1.0]).with_colormap(colormap::VIRIDIS, -1.0, 2.0));
+    for (id, mark, radius, tint) in [("ring-hover", w::RingMark::Hover, 3.0, 0), ("ring-selected", w::RingMark::Selected, 3.0, tint),
+        ("ring-following", w::RingMark::Following, 3.0, 0), ("ring-small", w::RingMark::Following, 0.4, 0)] {
+        items.extend(w::machine_ring(&p, ns, id, points[1], radius, mark, tint));
+    }
     entities_json(&items)
 }
 
@@ -141,13 +146,13 @@ fn entities_json(items: &[E]) -> serde_json::Value {
     serde_json::Value::Array(items.iter().map(|e| serde_json::json!({
         "ns": e.ns(), "id": e.id(), "op": e.op,
         "header": {"op": e.op, "kind": e.kind, "sub": e.sub, "style": e.style, "flags": e.flags,
-            "seq": e.seq, "chunk_offset": e.chunk_offset, "last": e.last, "_pad": e._pad,
+            "seq": e.seq, "chunk_offset": e.chunk_offset, "last": e.last,
             "color": e.color, "color2": e.color2, "colormap": e.colormap, "vmin": e.vmin, "vmax": e.vmax,
             "quant": e.quant, "width": e.width, "lifetime_s": e.lifetime_s,
             "px": e.px, "py": e.py, "pz": e.pz, "qw": e.qw, "qx": e.qx, "qy": e.qy, "qz": e.qz,
             "sx": e.sx, "sy": e.sy, "sz": e.sz, "dash": e.dash,
             "glow": e.glow, "pulse_hz": e.pulse_hz, "flow_speed": e.flow_speed,
-            "fade": e.fade, "beam_height": e.beam_height, "urgency": e.urgency},
+            "fade": e.fade, "beam_height": e.beam_height, "urgency": e.urgency, "opacity": e.opacity},
         "points": e.points, "instances": e.instances, "colors": e.colors, "radii": e.radii, "offsets": e.offsets,
         "rings": e.rings, "values": e.values, "cells": e.cells, "qpoints": e.qpoints, "ranges": e.ranges,
         "labels": e.label_list(), "props": e.props().iter().into_iter().collect::<std::collections::BTreeMap<_, _>>()

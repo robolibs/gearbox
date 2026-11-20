@@ -872,6 +872,9 @@ pub(crate) fn pick_on_click(
     mut selection: ResMut<Selection>,
     mut active: ResMut<ActiveStage>,
     mut hover: ResMut<super::machine_context::MachineHover>,
+    time: Res<Time<Real>>,
+    mut follow: ResMut<FollowTarget>,
+    mut run: Local<ClickRun>,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
         selection.0 = None;
@@ -880,6 +883,7 @@ pub(crate) fn pick_on_click(
     if grab.0 || hover.captures_pointer {
         return;
     }
+    let now = time.elapsed_secs_f64();
     let Some(cursor) = input.pointer_pos else {
         return;
     };
@@ -903,15 +907,53 @@ pub(crate) fn pick_on_click(
             best = Some((e, root, t));
         }
     }
-    if let Some((hit, root, t)) = best {
-        let pick = picked(hit, root, &inventory, &prims, &parents);
-        hover.hit = pick.machine(&inventory).and_then(MachineRef::of);
-        if !input.primary_clicked {
-            return;
+    let Some((hit, root, t)) = best else {
+        if input.primary_clicked {
+            run.click(None, now);
         }
-        info!("pick: hit LoadedAsset {root:?} at t={t:.3}");
-        selection.0 = Some(pick);
-        active.0 = Some(root);
+        return;
+    };
+    let pick = picked(hit, root, &inventory, &prims, &parents);
+    let machine = pick.machine(&inventory).and_then(MachineRef::of);
+    hover.hit = machine.clone();
+    if !input.primary_clicked {
+        return;
+    }
+    info!("pick: hit LoadedAsset {root:?} at t={t:.3}");
+    selection.0 = Some(pick);
+    active.0 = Some(root);
+    if run.click(machine.clone(), now) {
+        let next = if follow.machine == machine { None } else { machine };
+        info!("pick: triple click, follow -> {next:?}");
+        follow.set(next);
+    }
+}
+
+/// Quick clicks in a row on one machine; the third toggles the camera
+/// following it.
+#[derive(Default)]
+pub(crate) struct ClickRun {
+    machine: Option<MachineRef>,
+    at: f64,
+    count: u32,
+}
+
+impl ClickRun {
+    /// Longest pause between the clicks of a run, seconds.
+    const GAP_S: f64 = 0.4;
+
+    /// Counts a click on `machine` (`None` for one on nothing) at `now`
+    /// seconds; true on the third click of a quick run on one machine.
+    pub(crate) fn click(&mut self, machine: Option<MachineRef>, now: f64) -> bool {
+        let same = machine.is_some() && machine == self.machine && now - self.at <= Self::GAP_S;
+        self.count = if same { self.count + 1 } else { 1 };
+        self.machine = machine;
+        self.at = now;
+        let third = self.count == 3;
+        if third {
+            self.count = 0;
+        }
+        third
     }
 }
 
@@ -1305,5 +1347,22 @@ mod tests {
                 - std::f64::consts::PI;
             assert!(off.abs() < 1.0e-5, "yaw {yaw} read as {got}");
         }
+    }
+
+    #[test]
+    fn only_three_quick_clicks_on_one_machine_toggle_the_follow() {
+        let machine = |id: &str| Some(MachineRef { scene_root: Entity::from_bits(1 << 32 | 7), machine_id: id.into() });
+        let run = |clicks: &[(Option<MachineRef>, f64)]| {
+            let mut run = ClickRun::default();
+            clicks.iter().map(|(m, t)| run.click(m.clone(), *t)).collect::<Vec<_>>()
+        };
+        let a = machine("a");
+        assert_eq!(run(&[(a.clone(), 0.0), (a.clone(), 0.3), (a.clone(), 0.6)]), [false, false, true]);
+        assert_eq!(run(&[(a.clone(), 0.0), (a.clone(), 0.3), (a.clone(), 0.75)]), [false, false, false], "a slow third click");
+        assert_eq!(run(&[(a.clone(), 0.0), (machine("b"), 0.1), (a.clone(), 0.2)]), [false, false, false], "another machine between");
+        assert_eq!(run(&[(a.clone(), 0.0), (None, 0.1), (a.clone(), 0.2)]), [false, false, false], "a click on nothing between");
+        assert_eq!(run(&[(None, 0.0), (None, 0.1), (None, 0.2)]), [false, false, false], "clicks on nothing");
+        let six: Vec<_> = (0..6).map(|i| (a.clone(), i as f64 * 0.2)).collect();
+        assert_eq!(run(&six), [false, false, true, false, false, true], "each run of three toggles once");
     }
 }

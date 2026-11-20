@@ -1055,7 +1055,7 @@ fn draw_entity_json(e: &DrawEntity) -> Value {
         "seq": e.seq, "chunk_offset": e.chunk_offset, "last": e.last, "lifetime_s": e.lifetime_s,
         "pose": [e.px, e.py, e.pz, e.qw, e.qx, e.qy, e.qz], "scale": [e.sx, e.sy, e.sz], "width": e.width,
         "style": draw_style::name(e.style), "glow": e.glow, "pulse_hz": e.pulse_hz, "flow_speed": e.flow_speed,
-        "dash": e.dash, "beam_height": e.beam_height, "fade": e.fade, "urgency": e.urgency,
+        "dash": e.dash, "beam_height": e.beam_height, "fade": e.fade, "urgency": e.urgency, "opacity": e.opacity,
         "color": hex_color(e.color), "color2": hex_color(e.color2),
         "points": e.point_list(), "colors": e.colors.iter().map(|c| hex_color(*c)).collect::<Vec<_>>(),
         "radii": e.radii, "offsets": e.offsets,
@@ -1066,10 +1066,10 @@ fn draw_entity_json(e: &DrawEntity) -> Value {
     })
 }
 
-const DRAW_KEYS: [&str; 37] = [
+const DRAW_KEYS: [&str; 38] = [
     "op", "kind", "sub", "flags", "fill", "seq", "chunk_offset", "last", "lifetime_s", "pose", "scale", "width", "color",
     "color2", "points", "colors", "radii", "offsets", "instances", "labels", "style", "glow", "pulse_hz", "flow_speed",
-    "dash", "beam_height", "fade", "urgency", "values", "rings", "qpoints", "ranges", "cells", "colormap", "vmin", "vmax",
+    "dash", "beam_height", "fade", "urgency", "opacity", "values", "rings", "qpoints", "ranges", "cells", "colormap", "vmin", "vmax",
     "quant",
 ];
 
@@ -1139,6 +1139,7 @@ fn draw_entity_from(v: &Value) -> Result<DrawEntity, String> {
     e.beam_height = num(v, "beam_height") as f32;
     e.fade = num(v, "fade") as f32;
     e.urgency = num(v, "urgency") as f32;
+    e.opacity = num(v, "opacity") as f32;
     e.color = color("color")?;
     e.color2 = color("color2")?;
     e.points = rows("points", 3);

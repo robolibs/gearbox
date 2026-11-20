@@ -150,8 +150,12 @@ def helper_contract_specs():
     draw.tf_tree("rover")
     draw.points("contract", "payload-controls", xyz, radii=[.1, -2, .3], colors=[tint, 1, 0xff00b4e9],
                 color=tint, color2=0x40cc7733, style="point_glow", width=-3, glow=-1, pulse_hz=.75,
-                flow_speed=.5, spacing=.25, beam_height=1.5, fade=.3, urgency=.4, values=[0, .5, 1],
+                flow_speed=.5, spacing=.25, beam_height=1.5, fade=.3, urgency=.4, opacity=.75, values=[0, .5, 1],
                 colormap="viridis", vmin=-1, vmax=2, **common)
+    draw.machine_ring("contract", "ring-hover", xyz[1], radius=3, mark="hover", **common)
+    draw.machine_ring("contract", "ring-selected", xyz[1], radius=3, mark="selected", color=tint, **common)
+    draw.machine_ring("contract", "ring-following", xyz[1], radius=3, mark="following", **common)
+    draw.machine_ring("contract", "ring-small", xyz[1], radius=0.4, mark="following", **common)
     return draw.specs
 
 
@@ -358,6 +362,22 @@ class DrawWorldTests(unittest.TestCase):
             self.assertEqual(spec["props"]["drape_anchor"], "true")
         self.assertEqual(len(points(marker)), 8)
         self.assertEqual(points(label), [(1.5, 0, 4)])
+
+    def test_machine_ring_is_one_ring_entity_carrying_its_mark(self):
+        for mark in ("hover", "selected", "following"):
+            draw = CaptureDraw()
+            draw.machine_ring("n", "tractor", (10, -4, 0.1), radius=3, mark=mark)
+            [ring] = draw.specs
+            self.assertEqual((ring["ns"], ring["id"], ring["op"]), ("n/tractor", "ring", client.DRAW_OP["upsert"]))
+            h = ring["header"]
+            self.assertEqual((h["kind"], h["style"], h["width"]), (client.DRAW_KIND["points"], client.DRAW_STYLE["ring"], 6))
+            self.assertEqual((h["color"], ring["props"]["mark"]), (client.RING_MARKS[mark], mark))
+            self.assertEqual([tuple(round(v, 5) for v in p) for p in points(ring)], [(10, -4, 0.1)])
+        draw = CaptureDraw()
+        draw.machine_ring("n", "tractor", radius=0.4)
+        self.assertEqual([(s["id"], s["op"]) for s in draw.specs], [("ring", client.DRAW_OP["delete"])])
+        with self.assertRaises(ValueError):
+            draw.machine_ring("n", "tractor", mark="spinning")
 
     def test_box_extents_and_field_wire_properties(self):
         draw = CaptureDraw()
@@ -750,7 +770,8 @@ class DrawWorldTests(unittest.TestCase):
             ("glow", "glow", "glow", 0), ("pulse_hz", "pulse_hz", "pulse_hz", 0),
             ("flow_speed", "flow_speed", "flow_speed", 0), ("spacing", "dash", "dash", 0),
             ("beam_height", "beam_height", "beam_height", 0), ("fade", "fade", "fade", 0),
-            ("urgency", "urgency", "urgency", 0), ("colormap", "palette", "colormap", 0),
+            ("urgency", "urgency", "urgency", 0), ("opacity", "opacity", "opacity", 0),
+            ("colormap", "palette", "colormap", 0),
             ("vmin", "vmin", "vmin", 0), ("vmax", "vmax", "vmax", 0),
         ]
         with patch.object(draw, "_deliver", return_value=client.Status()) as deliver:

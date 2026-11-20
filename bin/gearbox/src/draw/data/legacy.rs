@@ -54,7 +54,7 @@ impl<T> std::ops::DerefMut for RecordBuffer<T> {
 
 #[derive(Clone, ShaderType)]
 struct Uniform {
-    unused: Vec4,
+    finish: Vec4,
     world_from_local: Mat4,
     fx: Vec4,
     fx2: Vec4,
@@ -159,14 +159,15 @@ impl Points {
         };
         let on_top = e.flags & draw_flag::ON_TOP != 0;
         let fx = look.fx;
+        let opacity = super::super::visual::opacity_key(e);
         Ok(Some(Arc::new(Self {
             positions,
             samples,
             center,
             uniform: Uniform {
-                unused: Vec4::new(
+                finish: Vec4::new(
                     super::super::visual::blur_key(e) as f32 / 255.0,
-                    0.0,
+                    super::super::visual::scene_opacity(opacity as f32 / 255.0),
                     0.0,
                     0.0,
                 ),
@@ -175,7 +176,7 @@ impl Points {
                 fx2: Vec4::new(fx.fade, 0.0, fx.urgency, 0.0),
                 code: UVec4::new((look.flags & 0xfff) << 2 | (fx.style & 0x3f) << 14, 0, 0, 0),
             },
-            opaque: fx.style == draw_style::SPLAT && !on_top,
+            opaque: fx.style == draw_style::SPLAT && !on_top && opacity == u8::MAX,
             on_top,
             _charge: charge(budget, size_of::<Self>() + 2 * size_of::<usize>())?,
         })))

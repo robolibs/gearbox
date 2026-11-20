@@ -480,7 +480,7 @@ fn scalar_updates_preserve_every_unspecified_header_and_section() {
         .with_color(rgba(70, 180, 220, 180)).with_color2(rgba(220, 80, 20, 200))
         .with_style(draw_style::LIGHT_WALL).with_width(0.25)
         .with_glow(0.6).with_pulse(0.8).with_flow(1.2, 2.0).with_beam(3.0)
-        .with_fade(0.2).with_urgency(0.4).with_colormap(colormap::TURBO, -2.0, 10.0)
+        .with_fade(0.2).with_urgency(0.4).with_opacity(0.8).with_colormap(colormap::TURBO, -2.0, 10.0)
         .with_flags(draw_flag::FLAT | draw_flag::ON_TOP).with_lifetime(60.0)
         .with_labels(&["retained"]).with_prop("panel_finish", "black");
     let cases: &[(&str, fn(&mut DrawEntity))] = &[
@@ -488,7 +488,8 @@ fn scalar_updates_preserve_every_unspecified_header_and_section() {
         ("glow", |e| e.glow = 0.0), ("pulse_hz", |e| e.pulse_hz = 0.0),
         ("flow_speed", |e| e.flow_speed = 0.0), ("dash", |e| e.dash = 0.0),
         ("beam_height", |e| e.beam_height = 0.0), ("fade", |e| e.fade = 0.0),
-        ("urgency", |e| e.urgency = 0.0), ("palette", |e| e.colormap = 0),
+        ("urgency", |e| e.urgency = 0.0), ("opacity", |e| e.opacity = 0.0),
+        ("palette", |e| e.colormap = 0),
         ("vmin", |e| e.vmin = 0.0), ("vmax", |e| e.vmax = 0.0),
         ("props", |_| {}),
     ];
@@ -508,6 +509,18 @@ fn scalar_updates_preserve_every_unspecified_header_and_section() {
         .with_prop("panel_finish", "white").updating(&["glow", "props"]), 1.0).unwrap();
     let expected = base.with_glow(-1.0).with_prop("panel_finish", "white");
     assert_eq!(pack(&store.get("lab", "energy").unwrap().entity).wire(), pack(&expected).wire());
+}
+
+#[test]
+fn drawings_show_at_half_opacity_unless_they_give_their_own() {
+    use gearbox_api::wire::draw::DEFAULT_OPACITY;
+    let e = DrawEntity::lines("lab", "path", &[[0.0; 3], [1.0; 3]]);
+    assert_eq!(DEFAULT_OPACITY, 0.5);
+    assert_eq!(e.shown_opacity(), DEFAULT_OPACITY);
+    for (given, shown) in [(1.0, 1.0), (0.3, 0.3), (4.0, 1.0), (-1.0, DEFAULT_OPACITY)] {
+        assert_eq!(e.clone().with_opacity(given).shown_opacity(), shown, "opacity {given}");
+    }
+    assert!(DrawStore::default().apply(e.with_opacity(f32::NAN), 0.0).is_err());
 }
 
 #[test]

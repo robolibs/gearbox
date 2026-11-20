@@ -103,6 +103,9 @@ struct Common {
     /// How pressing it is, 0..1: shields ripple faster and turn vermillion
     #[arg(long)]
     urgency: Option<f32>,
+    /// Opacity of the whole drawing, 0..1 (default 0.5, 1 fully opaque)
+    #[arg(long)]
+    opacity: Option<f32>,
     /// Lie flat in the frame's XY plane instead of facing the camera
     #[arg(long)]
     flat: bool,
@@ -154,6 +157,8 @@ struct UpdateOptions {
     fade: Option<f32>,
     #[arg(long, allow_negative_numbers = true)]
     urgency: Option<f32>,
+    #[arg(long)]
+    opacity: Option<f32>,
     /// Replace the complete flags bitmask
     #[arg(long)]
     flags: Option<u32>,
@@ -206,6 +211,7 @@ impl UpdateOptions {
             ("beam_height", &mut e.beam_height, self.beam),
             ("fade", &mut e.fade, self.fade),
             ("urgency", &mut e.urgency, self.urgency),
+            ("opacity", &mut e.opacity, self.opacity),
             ("vmin", &mut e.vmin, self.vmin),
             ("vmax", &mut e.vmax, self.vmax),
         ] {
@@ -804,6 +810,21 @@ enum Cmd {
         #[arg(long, default_value = "")]
         text: String,
     },
+    /// A flat ring round a machine at --pose: broken for hover and selected,
+    /// closed with inward chevrons for following
+    MachineRing {
+        #[command(flatten)]
+        common: Common,
+        /// Outer radius, metres
+        #[arg(long, default_value_t = 2.0)]
+        radius: f32,
+        /// hover, selected or following
+        #[arg(long, default_value = "selected")]
+        mark: String,
+        /// Height over the ground (or the pose when not draped), metres
+        #[arg(long, default_value_t = 0.1)]
+        height: f32,
+    },
     /// World-space corner brackets for supplied extents at --pose
     ClearanceBox {
         #[command(flatten)]
@@ -976,7 +997,7 @@ fn restyle(e: DrawEntity, c: &Common) -> Result<DrawEntity> {
     if c.style != "auto" {
         e = e.with_style(draw_style::parse(&c.style).ok_or_else(|| CliError::usage(format!("unknown style `{}`", c.style)))?);
     }
-    for (v, slot) in [(c.glow, &mut e.glow), (c.pulse, &mut e.pulse_hz), (c.flow, &mut e.flow_speed), (c.beam, &mut e.beam_height), (c.fade, &mut e.fade), (c.urgency, &mut e.urgency)] {
+    for (v, slot) in [(c.glow, &mut e.glow), (c.pulse, &mut e.pulse_hz), (c.flow, &mut e.flow_speed), (c.beam, &mut e.beam_height), (c.fade, &mut e.fade), (c.urgency, &mut e.urgency), (c.opacity, &mut e.opacity)] {
         if let Some(v) = v {
             *slot = v;
         }
@@ -1023,7 +1044,8 @@ fn entity(kind: u32, c: &Common) -> Result<DrawEntity> {
         .with_flow(c.flow.unwrap_or(0.0), c.spacing.unwrap_or(0.0))
         .with_beam(c.beam.unwrap_or(0.0))
         .with_fade(c.fade.unwrap_or(0.0))
-        .with_urgency(c.urgency.unwrap_or(0.0));
+        .with_urgency(c.urgency.unwrap_or(0.0))
+        .with_opacity(c.opacity.unwrap_or(0.0));
     if c.flat {
         e = e.with_flags(draw_flag::FLAT);
     }
@@ -1083,6 +1105,13 @@ fn world_color(c: &Common) -> Result<u32> {
 
 fn waypoint_entities(c: &Common, points: &[[f32; 3]], current: usize) -> Result<Vec<DrawEntity>> {
     Ok(w::waypoints_colored(&place(c), &c.ns, &c.id, points, current, world_color(c)?))
+}
+
+fn machine_ring_entities(c: &Common, radius: f32, mark: &str, height: f32) -> Result<Vec<DrawEntity>> {
+    let mark = w::RingMark::parse(mark)
+        .ok_or_else(|| CliError::usage(format!("unknown ring mark `{mark}`; choose hover, selected or following")))?;
+    let tint = if c.color.is_some() { color(&c.color)? } else { 0 };
+    Ok(w::machine_ring(&place(c), &c.ns, &c.id, [0.0, 0.0, height], radius, mark, tint))
 }
 
 fn world_size(text: &str) -> Result<[f32; 3]> {
@@ -1572,6 +1601,10 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             let parts = w::destination(&place(&common), &common.ns, &common.id, entity_pose(&common), radius, &text, world_color(&common)?);
             send_world(ctx, &common, "destination", parts)
         }
+        Cmd::MachineRing { common, radius, mark, height } => {
+            let parts = machine_ring_entities(&common, radius, &mark, height)?;
+            send_world(ctx, &common, "machine-ring", parts)
+        }
         Cmd::ClearanceBox { common, size, text } => {
             let parts = w::clearance_box(&place(&common), &common.ns, &common.id, entity_pose(&common), world_size(&size)?, world_color(&common)?, &text);
             send_world(ctx, &common, "clearance-box", parts)
@@ -1735,6 +1768,23 @@ mod tests {
         Ok((common, entities))
     }
 
+    #[test]
+    fn machine_ring_takes_its_mark_tint_and_pose() {
+        let ring = |args: &[&str]| {
+            let Cmd::MachineRing { common, radius, mark, height } = parse(args).unwrap() else { panic!("machine-ring command") };
+            machine_ring_entities(&common, radius, &mark, height).and_then(|parts| world_entities(&common, parts))
+        };
+        let parts = ring(&["machine-ring", "n", "tractor", "--mark", "following", "--radius", "3", "--pose", "1", "2", "0"]).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!((parts[0].ns(), parts[0].id()), ("n/tractor".to_string(), "ring".to_string()));
+        assert_eq!(parts[0].color, w::RingMark::Following.tint());
+        assert_eq!((parts[0].px, parts[0].py, parts[0].width), (1.0, 2.0, 6.0));
+        assert_eq!(parts[0].props().get("mark").as_deref(), Some("following"));
+        let selected = ring(&["machine-ring", "n", "tractor", "--color", "red"]).unwrap();
+        assert_eq!(selected[0].color, gearbox_api::draw_color::RED);
+        assert!(ring(&["machine-ring", "n", "tractor", "--mark", "spinning"]).is_err());
+    }
+
     fn prepare(args: &[&str]) -> Vec<DrawEntity> {
         build(parse(args).expect("valid CLI syntax")).expect("valid world geometry").1
     }
@@ -1750,7 +1800,7 @@ mod tests {
         for (option, mask) in [
             ("glow", "glow"), ("pulse", "pulse_hz"), ("flow", "flow_speed"),
             ("spacing", "dash"), ("beam", "beam_height"), ("fade", "fade"),
-            ("urgency", "urgency"), ("vmin", "vmin"), ("vmax", "vmax"),
+            ("urgency", "urgency"), ("opacity", "opacity"), ("vmin", "vmin"), ("vmax", "vmax"),
             ("flags", "flags"), ("width", "width"), ("lifetime", "lifetime"),
         ] {
             let e = update(&[&format!("--{option}"), "0"]).unwrap();
@@ -1811,7 +1861,7 @@ mod tests {
         let options = [
             "--frame", "robot/link", "--lifetime", "7", "--pose", "-10", "-20", "-30", "-0.5",
             "--width", "-2.5", "--glow", "-1", "--pulse", "-2", "--flow", "-3", "--spacing", "-4",
-            "--beam", "-5", "--fade", "0.25", "--urgency", "0.4", "--snapshot", "--flat", "--additive",
+            "--beam", "-5", "--fade", "0.25", "--urgency", "0.4", "--opacity", "0.8", "--snapshot", "--flat", "--additive",
             "--on-top", "--no-drape", "--style", "plain", "--color", "#00000000",
         ];
         for case in WORLD_CASES {
@@ -1830,7 +1880,7 @@ mod tests {
                 assert_eq!([e.qx, e.qy], [0.0, 0.0]);
                 assert_eq!(e.width, -2.5);
                 assert_eq!([e.glow, e.pulse_hz, e.flow_speed, e.dash, e.beam_height], [-1.0, -2.0, -3.0, -4.0, -5.0]);
-                assert_eq!([e.fade, e.urgency], [0.25, 0.4]);
+                assert_eq!([e.fade, e.urgency, e.opacity], [0.25, 0.4, 0.8]);
                 assert_eq!(e.flags & flags, flags);
                 assert_eq!(e.flags & draw_flag::DRAPE, 0);
                 assert_eq!(e.style, draw_style::PLAIN);

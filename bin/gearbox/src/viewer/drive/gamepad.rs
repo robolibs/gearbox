@@ -133,9 +133,6 @@ pub(super) fn route(
         if let Some(previous) = panel.gamepad.take() {
             ui.stop_once(&previous);
         }
-        if follow.machine.is_some() {
-            follow.set(selected.clone());
-        }
         info!("gearbox-pad: selected={selected:?}");
     }
     state.selected = selected.clone();
@@ -257,5 +254,35 @@ mod tests {
                 machine_id: "rover_b".into()
             })
         );
+    }
+
+    #[test]
+    fn selecting_another_machine_keeps_the_followed_one() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let root = world.spawn_empty().id();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/tractor.usd");
+        let tractor = crate::controller::discover_machines_from_usd(&path).unwrap().remove(0);
+        let machines = ["a", "b"].map(|id| {
+            let mut machine = tractor.clone();
+            machine.id = id.into();
+            machine.scene_root = Some(root);
+            machine
+        });
+        let pick = |id: &str| MachineRef { scene_root: root, machine_id: id.into() };
+        world.insert_resource(ControllerInventory { machines: machines.to_vec() });
+        world.insert_resource(Selection(Some(Selected::Machine(pick("a")))));
+        world.insert_resource(FollowTarget { machine: Some(pick("a")), anchor: None });
+        world.init_resource::<super::super::HostInputFocus>();
+        world.init_resource::<ActiveStage>();
+        world.init_resource::<MachinePanel>();
+        world.init_resource::<UiDrive>();
+        world.init_resource::<GamepadState>();
+        world.init_resource::<HostCommands>();
+        world.init_resource::<super::super::ControlSettings>();
+        world.run_system_once(route).unwrap();
+        world.resource_mut::<Selection>().0 = Some(Selected::Machine(pick("b")));
+        world.run_system_once(route).unwrap();
+        assert_eq!(world.resource::<FollowTarget>().machine, Some(pick("a")), "one click must not move the follow");
     }
 }

@@ -6,6 +6,7 @@ import gearbox::draw::draw_common::{srgb_to_linear, display_to_scene, technical_
 // Static heat maps with filtered cells, contours and screen-width registration edges.
 
 struct HeatParams {
+    // Frost strength, opacity, unused, unused.
     frost: vec4<f32>,
     // Texture columns and rows, contour spacing (share of the map), glow.
     grid: vec4<f32>,
@@ -81,5 +82,5 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let body = col * (1.0 - structure - 0.16 * contour);
     let light = ink_highlight(col) * (0.06 * frame + 0.08 * corner + params.look.z * hot * (1.0 - params.look.w))
         * c.a * params.grid.w;
-    return background_frost(vec4(body * alpha + light, alpha), in.position.xy, params.frost.x);
+    return background_frost(vec4(body * alpha + light, alpha), in.position.xy, params.frost.x) * params.frost.y;
 }

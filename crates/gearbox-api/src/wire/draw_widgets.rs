@@ -9,7 +9,7 @@ use super::draw::*;
 use super::draw_geom::{covariance_axes, covariance_ellipse, pinhole_fov, quat_from_axes};
 
 mod world;
-pub use world::{TerrainGlyph, clearance_box, destination, field_volume, route_stations, terrain_marks};
+pub use world::{RING_MIN_RADIUS, RingMark, TerrainGlyph, clearance_box, destination, field_volume, machine_ring, route_stations, terrain_marks};
 
 /// Fraction of an edge occupied by each structural corner bracket.
 pub const BRACKET_FRACTION: f32 = 0.18;

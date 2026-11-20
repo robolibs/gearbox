@@ -221,7 +221,7 @@ let finish = DrawEntity::update("demo", "range")
 
 `tint` selects primary RGBA, `color2` secondary RGBA, `palette` the colormap
 ID, and `vmin`/`vmax` individual bounds. Effect selectors use their wire field
-names: `glow`, `pulse_hz`, `flow_speed`, `dash`, `beam_height`, `fade`, `urgency`.
+names: `glow`, `pulse_hz`, `flow_speed`, `dash`, `beam_height`, `fade`, `urgency`, `opacity`.
 Legacy `color`, `effects` and `colormap` masks still replace their whole groups.
 An absent or empty wire mask still replaces all headers; `props` is metadata
 only. Scalar masks require the updated host as well as the client.

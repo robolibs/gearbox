@@ -31,7 +31,7 @@ pub mod draw_op {
     /// `scale`, `color`, `width`, `style`, `effects`, `flags`, `colormap`,
     /// `lifetime`), all of them when absent or empty. Scalar selectors are
     /// `tint` (primary colour), `color2`, `glow`, `pulse_hz`, `flow_speed`,
-    /// `dash`, `beam_height`, `fade`, `urgency`, `palette` (colormap ID),
+    /// `dash`, `beam_height`, `fade`, `urgency`, `opacity`, `palette` (colormap ID),
     /// `vmin` and `vmax`. `props` alone merges metadata without changing headers.
     pub const UPDATE: u32 = 5;
     /// Replace items `chunk_offset..chunk_offset + n` of the live entity
@@ -352,6 +352,9 @@ pub mod draw_flag {
     pub const DRAPE: u32 = 1 << 10;
     /// Lines end in an arrowhead at the last point of each strip.
     pub const ARROW_TIP: u32 = 1 << 11;
+    /// Shown in the viewer only, left out of captures and recordings; ghost
+    /// copies and compact point sets ignore it.
+    pub const VIEW_ONLY: u32 = 1 << 12;
 
     pub fn fill_parse(name: &str) -> Option<u32> {
         match name {
@@ -425,10 +428,14 @@ pub mod draw_style {
     /// Negative glow disables emission; negative pulse disables the scan.
     /// Other geometry uses plain style.
     pub const FIELD: u32 = 20;
+    /// A machine's ring on the ground around each point, `width` across: a
+    /// band inside the rim in four strong arcs with faint gaps. Props `mark`
+    /// `following` closes the gaps and adds a thin line outside the rim.
+    pub const RING: u32 = 21;
 
-    const NAMES: [&str; 21] = [
+    const NAMES: [&str; 22] = [
         "auto", "plain", "ribbon_flow", "tube_pulse", "hairline", "light_wall", "beacon", "holo", "shield", "alert", "orb",
-        "decal", "arrow_glow", "point_glow", "label", "heat", "splat", "sweep", "ghost", "ruler", "field",
+        "decal", "arrow_glow", "point_glow", "label", "heat", "splat", "sweep", "ghost", "ruler", "field", "ring",
     ];
 
     pub fn name(value: u32) -> &'static str {
@@ -454,6 +461,7 @@ pub mod draw_style {
             "cloud" | "splats" => "splat",
             "fov" | "radar" => "sweep",
             "measure" => "ruler",
+            "selection" | "machine_ring" => "ring",
             other => other,
         };
         NAMES.iter().position(|n| *n == alias).map(|i| i as u32)
@@ -466,7 +474,7 @@ pub mod draw_style {
         #[test]
         fn field_appends_without_renumbering_existing_styles() {
             let ids = [AUTO, PLAIN, RIBBON_FLOW, TUBE_PULSE, HAIRLINE, LIGHT_WALL, BEACON, HOLO, SHIELD, ALERT, ORB,
-                DECAL, ARROW_GLOW, POINT_GLOW, LABEL, HEAT, SPLAT, SWEEP, GHOST, RULER, FIELD];
+                DECAL, ARROW_GLOW, POINT_GLOW, LABEL, HEAT, SPLAT, SWEEP, GHOST, RULER, FIELD, RING];
             for (index, id) in ids.into_iter().enumerate() {
                 assert_eq!(id, index as u32);
                 assert_eq!(parse(name(id)), Some(id));
@@ -708,6 +716,9 @@ pub const DEFAULT_RANGE_QUANT: f32 = 0.001;
 /// A scan range meaning no return.
 pub const NO_RETURN: u16 = u16::MAX;
 
+/// Opacity of a drawing whose `opacity` is 0.
+pub const DEFAULT_OPACITY: f32 = 0.5;
+
 /// RGBA8 packed as `r | g << 8 | b << 16 | a << 24` (bytes r, g, b, a).
 pub fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
     u32::from_le_bytes([r, g, b, a])
@@ -868,6 +879,8 @@ pub struct DrawEntity {
     pub fade: f32,
     /// Urgency metadata, 0..1; does not replace the supplied colour.
     pub urgency: f32,
+    /// Opacity of the whole drawing, 0..1; 0 is [`DEFAULT_OPACITY`].
+    pub opacity: f32,
     /// Values `vmin..vmax` span a ramp [`colormap`]; equal ones take the
     /// data's own range, `vmin` above `vmax` runs the ramp backwards.
     pub vmin: f32,
@@ -895,7 +908,6 @@ pub struct DrawEntity {
     pub color2: u32,
     /// [`colormap`] `values` and `cells` are coloured through.
     pub colormap: u32,
-    pub _pad: u32,
     /// xyz per point.
     #[dp(bytes, section = "points")]
     pub points: Vec<f32>,
@@ -1280,6 +1292,17 @@ impl DrawEntity {
         self
     }
 
+    /// Opacity of the whole drawing, 0..1; 0 is [`DEFAULT_OPACITY`].
+    pub fn with_opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity;
+        self
+    }
+
+    /// The opacity it is shown at.
+    pub fn shown_opacity(&self) -> f32 {
+        if self.opacity > 0.0 { self.opacity.min(1.0) } else { DEFAULT_OPACITY }
+    }
+
     pub fn with_fill(mut self, fill: u32) -> Self {
         self.flags = (self.flags & !draw_flag::FILL_MASK) | (fill & draw_flag::FILL_MASK);
         self
@@ -1580,6 +1603,7 @@ impl DrawEntity {
             self.beam_height,
             self.fade,
             self.urgency,
+            self.opacity,
             self.vmin,
             self.vmax,
             self.quant,

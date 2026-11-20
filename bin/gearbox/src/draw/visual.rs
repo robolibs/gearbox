@@ -37,6 +37,16 @@ pub(crate) fn blur_key(entity: &gearbox_api::DrawEntity) -> u8 {
     (blur(entity, 0.0) * 255.0).round() as u8
 }
 
+/// The entity's shown opacity in 1/255 steps, at least one step.
+pub(crate) fn opacity_key(entity: &gearbox_api::DrawEntity) -> u8 {
+    (entity.shown_opacity() * 255.0).round().max(1.0) as u8
+}
+
+/// Scene-linear coverage that shows as `opacity` once tonemapped.
+pub(crate) fn scene_opacity(opacity: f32) -> f32 {
+    opacity.clamp(0.0, 1.0).powf(2.2)
+}
+
 pub(crate) fn label_opacity(depth: f32, max_distance: Option<f32>) -> f32 {
     if !depth.is_finite() || depth <= 0.0 {
         return 0.0;
@@ -84,7 +94,7 @@ const fn fx(
     }
 }
 
-const EFFECTS: [EffectDefaults; 21] = [
+const EFFECTS: [EffectDefaults; 22] = [
     fx(0.0, 0.0, 0.0, 0.4, 0.0, 1.0), // auto
     fx(0.0, 0.0, 0.0, 0.4, 0.0, 1.0), // plain
     fx(
@@ -113,6 +123,7 @@ const EFFECTS: [EffectDefaults; 21] = [
     fx(0.60, ENERGY_HZ, 0.0, 0.4, 0.0, 0.15), // ghost
     fx(0.55, 0.0, 0.0, 0.0, 0.0, 1.0), // ruler
     fx(0.60, ENERGY_HZ, 0.0, 1.0, 0.0, 1.0), // field
+    fx(0.55, ENERGY_HZ, 0.0, 0.4, 0.0, 1.0), // ring
 ];
 
 pub(crate) fn defaults(style: u32) -> EffectDefaults {
@@ -234,6 +245,7 @@ mod tests {
             draw_style::SWEEP,
             draw_style::GHOST,
             draw_style::FIELD,
+            draw_style::RING,
         ] {
             let e = defaults(style);
             assert_eq!(e.pulse, ENERGY_HZ);

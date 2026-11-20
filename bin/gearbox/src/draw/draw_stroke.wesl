@@ -11,7 +11,8 @@ import gearbox::draw::draw_common::{srgb_to_linear, display_to_scene, technical_
 // leaves premultiplied, light added with no alpha.
 
 struct StrokeParams {
-    unused: vec4<f32>,
+    // Frost strength, opacity, unused, unused.
+    finish: vec4<f32>,
     @if((DRAW_COMPACT_POINTS))
     world_from_local: mat4x4<f32>,
     @if((DRAW_COMPACT_POINTS))
@@ -611,7 +612,7 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
         discard;
     }
     @if((!(DRAW_SPLAT)))
-    out.color = background_frost(vec4(over * over_a + light, over_a), in.position.xy, params.unused.x);
+    out.color = background_frost(vec4(over * over_a + light, over_a), in.position.xy, params.finish.x) * params.finish.y;
     @if((!(DRAW_SPLAT)))
     return out;
 }

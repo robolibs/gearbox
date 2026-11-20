@@ -122,6 +122,69 @@ fn repeated_updates_reuse_meshes_and_release_replaced_grid_images() {
 }
 
 #[test]
+fn view_only_draws_move_to_the_viewer_overlay_and_back() {
+    let mut app = app();
+    let line = || DrawEntity::lines("view", "line", &[[0.0; 3], [1.0, 0.0, 0.0]]).with_width(0.1);
+    let layers = |app: &mut App| {
+        let world = app.world_mut();
+        let parts: Vec<Entity> = world.resource::<DrawVisuals>().map.values()
+            .flat_map(|v| v.parts.iter().flatten().map(|part| part.entity)).collect();
+        parts.into_iter().map(|e| world.get::<RenderLayers>(e).cloned().unwrap()).collect::<Vec<_>>()
+    };
+    let overlay = RenderLayers::layer(crate::viewer::recorder::OVERLAY_LAYER);
+    apply(&app, line().with_flags(draw_flag::VIEW_ONLY));
+    settle(&mut app);
+    assert_eq!(layers(&mut app), [overlay.clone()], "a view-only line stays out of captures");
+    apply(&app, line().with_color(gearbox_api::wire::draw::rgba(9, 9, 9, 255)));
+    settle(&mut app);
+    assert_eq!(layers(&mut app), [RenderLayers::layer(DRAW_LAYER)], "clearing the flag puts it back");
+    apply(&app, line().with_flags(draw_flag::VIEW_ONLY));
+    settle(&mut app);
+    assert_eq!(layers(&mut app), [overlay], "setting it again moves the kept part");
+}
+
+#[test]
+fn drawings_show_at_half_opacity_unless_they_ask_otherwise() {
+    let mut app = app();
+    let send = |app: &App, opacity: f32| {
+        let corners = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let solid = gearbox_api::wire::draw::rgba(200, 80, 40, 255);
+        apply(app, DrawEntity::triangles("see", "solid", &corners).with_style(gearbox_api::draw_style::PLAIN)
+            .with_color(solid).with_opacity(opacity));
+        apply(app, DrawEntity::lines("see", "line", &corners).with_width(0.1).with_opacity(opacity));
+        apply(app, DrawEntity::grid("see", "grid", 2, 2, 0.5, GridCells::U8(vec![9; 4])).with_opacity(opacity));
+    };
+    let shown = |app: &mut App| {
+        let world = app.world();
+        let visuals = &world.resource::<DrawVisuals>().map;
+        let visual = |id: &str| &visuals[&("see".to_string(), id.to_string())];
+        let part = |id: &str, slot: usize| visual(id).parts[slot].as_ref().unwrap().entity;
+        let fill = &world.get::<MeshMaterial3d<SurfaceMaterial>>(part("solid", 0)).unwrap().0;
+        let fill = world.resource::<Assets<SurfaceMaterial>>().get(fill).unwrap();
+        let stroke = &world.get::<MeshMaterial3d<StrokeMaterial>>(part("line", 1)).unwrap().0;
+        let stroke = world.resource::<Assets<StrokeMaterial>>().get(stroke).unwrap();
+        let heat = visual("grid").heat_material.as_ref().unwrap();
+        let heat = world.resource::<Assets<heat::HeatMaterial>>().get(heat).unwrap();
+        (fill.flags.z, fill.translucent, stroke.finish.y, heat.params.frost.y, visual("line").opacity)
+    };
+    let near = |o: f32, want: f32| (o - want).abs() <= 1.0 / 255.0;
+    for (given, asked) in [(0.0, 0.5), (0.2, 0.2)] {
+        send(&app, given);
+        settle(&mut app);
+        let (fill, translucent, stroke, heat, labels) = shown(&mut app);
+        let scene = [fill, stroke, heat];
+        let want = visual::scene_opacity(asked);
+        assert!(scene.iter().all(|o| near(*o, want)), "scene coverage for {asked}: {scene:?}");
+        assert!(near(labels, asked), "labels are painted at {asked} itself, not {labels}");
+        assert!(translucent, "a solid fill blends once it is see-through");
+    }
+    assert!(near(visual::scene_opacity(0.5), 0.2176), "half shown is about a fifth in the scene");
+    send(&app, 1.0);
+    settle(&mut app);
+    assert_eq!(shown(&mut app), (1.0, false, 1.0, 1.0, 1.0), "asked for fully opaque");
+}
+
+#[test]
 fn removed_roots_recover_and_kind_replacement_releases_old_parts() {
     let mut app = app();
     populate(&app, 1);

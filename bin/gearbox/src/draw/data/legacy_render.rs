@@ -402,7 +402,7 @@ impl Prepare<'_, '_> {
                         style,
                         ready: false,
                         count: node.points.positions.values.len() as u32,
-                        frost: !node.points.opaque && node.uniform.unused.x > 0.0,
+                        frost: !node.points.opaque && node.uniform.finish.x > 0.0,
                         _charge: metadata,
                     },
                 )
@@ -410,7 +410,7 @@ impl Prepare<'_, '_> {
         }
         let sizes = keys.map(|key| cache.storage[&key].buffer.buffer.size());
         let page = cache.pages.get_mut(&entity).unwrap();
-        page.frost = !node.points.opaque && node.uniform.unused.x > 0.0;
+        page.frost = !node.points.opaque && node.uniform.finish.x > 0.0;
         let bytes = owned_uniform(budget, &node.uniform).map_err(|_| Issue::CpuBudget)?;
         let uniform_size = bytes.len();
         let first = page.bytes.is_empty();
@@ -578,7 +578,7 @@ fn queue(
             }
             let points = &node.points;
             if !points.opaque
-                && node.uniform.unused.x > 0.0
+                && node.uniform.finish.x > 0.0
                 && !frost.is_some_and(|frost| {
                     frost.ready(camera.physical_target_size, view.target_format)
                 })
@@ -592,7 +592,7 @@ fn queue(
                     key,
                     points.opaque,
                     points.on_top,
-                    !points.opaque && node.uniform.unused.x > 0.0,
+                    !points.opaque && node.uniform.finish.x > 0.0,
                     shared.layout.clone(),
                 ),
             );

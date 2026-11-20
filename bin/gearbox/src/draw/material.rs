@@ -61,8 +61,9 @@ const STROKE_BIAS: f32 = 0.5;
 #[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
 #[bind_group_data(StrokeKey)]
 pub struct StrokeMaterial {
+    /// x: frost strength, y: opacity.
     #[uniform(0)]
-    pub unused: Vec4,
+    pub finish: Vec4,
     #[texture(1, dimension = "3d")]
     #[sampler(2)]
     pub lut: Handle<Image>,
@@ -107,7 +108,7 @@ impl Material for StrokeMaterial {
     }
 
     fn reads_view_transmission_texture(&self) -> bool {
-        self.unused.x > 0.0 && (!self.splat || self.on_top)
+        self.finish.x > 0.0 && (!self.splat || self.on_top)
     }
 
     fn depth_bias(&self) -> f32 {
@@ -164,7 +165,7 @@ impl Material for StrokeMaterial {
 #[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
 #[bind_group_data(SurfaceKey)]
 pub struct SurfaceMaterial {
-    /// x: 1 to shade with a headlight.
+    /// x: 1 to shade with a headlight, y: frost strength, z: opacity.
     #[uniform(0)]
     pub flags: Vec4,
     #[texture(1, dimension = "3d")]
@@ -287,7 +288,7 @@ mod frost_tests {
     #[test]
     fn opaque_data_keeps_its_depth_path_when_blur_is_requested() {
         let mut stroke = StrokeMaterial {
-            unused: Vec4::X,
+            finish: Vec4::X,
             lut: Default::default(),
             on_top: false,
             splat: true,

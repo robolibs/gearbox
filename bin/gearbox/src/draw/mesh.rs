@@ -55,6 +55,18 @@ const LOOK_GHOST: f32 = 10.0;
 const LOOK_PLANE: f32 = 11.0;
 const LOOK_ZONE: f32 = 12.0;
 const LOOK_FIELD: f32 = 13.0;
+const LOOK_MACHINE: f32 = 14.0;
+/// How far a ring's disc reaches past its rim, for the lock brackets.
+const RING_REACH: f32 = 1.15;
+
+/// A ring's state for the shader: 0 hover, 1 selected, 2 following.
+fn ring_mark(e: &DrawEntity) -> f32 {
+    match e.props().get("mark").as_deref() {
+        Some("hover") => 0.0,
+        Some("following") => 2.0,
+        _ => 1.0,
+    }
+}
 const LOCAL_OUTLINE: f32 = 8.0;
 
 /// Role colours (Okabe-Ito) auto styles draw in when no colour is given.
@@ -127,6 +139,7 @@ fn role_color(style: u32) -> Option<[u8; 4]> {
         draw_style::DECAL => [255, 255, 255, 255],
         draw_style::RULER => GOAL,
         draw_style::SWEEP => SENSOR,
+        draw_style::RING => PLAN,
         draw_style::SPLAT => PLAN,
         draw_style::GHOST => PLAN,
         _ => return None,
@@ -2231,6 +2244,11 @@ pub fn build_on(e: &DrawEntity, ns: &str, id: &str, ground: Ground) -> Built {
                             .point(*p, color, r, shape | stroke_flags & FLAG_FLAT);
                     }
                     draw_style::ORB => out.strokes.point(*p, color, r, stroke_flags & FLAG_ADD),
+                    draw_style::RING => {
+                        out.fill.look = [LOOK_MACHINE, fx.glow, fx.pulse_hz, phase];
+                        out.fill.look2 = [fx.urgency, 0.0, fx.spacing, ring_mark(e)];
+                        out.fill.ground_disc(*p, metres(r, 1.0) * RING_REACH, color);
+                    }
                     draw_style::BEACON => {
                         out.strokes.pen.style = draw_style::ORB;
                         out.strokes.point(
@@ -4892,6 +4910,24 @@ mod tests {
                 assert_eq!(prims(&built.strokes), corners, "{style} {shape}");
                 assert!(!built.fill.is_empty());
                 assert!(built.fill.fx.iter().all(|fx| fx[0] == built.fill.fx[0][0]));
+            }
+        }
+    }
+
+    #[test]
+    fn a_ring_point_is_one_machine_disc_carrying_its_mark() {
+        for (mark, value) in [("hover", 0.0), ("selected", 1.0), ("following", 2.0)] {
+            let e = DrawEntity::points("t", "r", &[[0.0; 3]])
+                .with_style(draw_style::RING)
+                .with_width(6.0)
+                .with_prop("mark", mark);
+            let built = build(&e, "t", "r");
+            assert!(built.strokes.is_empty(), "a ring draws no point glyph");
+            assert!(!built.fill.fx.is_empty());
+            assert!(built.fill.fx.iter().all(|fx| fx[0] == LOOK_MACHINE));
+            for fx2 in &built.fill.fx2 {
+                assert_eq!(fx2[3], value, "{mark}");
+                assert!((fx2[1] - 3.0 * RING_REACH).abs() < 1e-5, "the disc reaches past the rim");
             }
         }
     }

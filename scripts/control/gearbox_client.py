@@ -916,10 +916,12 @@ COLORMAP = {name: i for i, name in enumerate((
     "none", "turbo", "viridis", "rdylgn", "costmap", "map", "raw", "okabe", "rainbow", "grey"))}
 DRAW_FLAG = {"on_top": 1 << 2, "labels": 1 << 3, "flat_caps": 1 << 4, "dashed": 1 << 5,
              "snapshot": 1 << 6, "shaded": 1 << 7, "flat": 1 << 8, "additive": 1 << 9, "drape": 1 << 10,
-             "arrow_tip": 1 << 11}
+             "arrow_tip": 1 << 11, "view_only": 1 << 12}
+RING_MARKS = {"hover": 0x50ECE8DC, "selected": 0x8CECE8DC, "following": 0x8CECE8DC}
+RING_MIN_RADIUS = 0.5
 DRAW_STYLE = {name: i for i, name in enumerate((
     "auto", "plain", "ribbon_flow", "tube_pulse", "hairline", "light_wall", "beacon", "holo", "shield", "alert", "orb",
-    "decal", "arrow_glow", "point_glow", "label", "heat", "splat", "sweep", "ghost", "ruler", "field"))}
+    "decal", "arrow_glow", "point_glow", "label", "heat", "splat", "sweep", "ghost", "ruler", "field", "ring"))}
 TERRAIN_GLYPHS = ("square", "cross", "triangle", "diamond")
 _WORLD_MAX_POINTS = 65_536
 _WORLD_MAX_STATIONS = 4_096
@@ -929,6 +931,7 @@ ROLE = {"plan": "#56B4E9", "prediction": "#009E73", "lookahead": "#E69F00", "goa
         "obstacle": "#CC79A7", "danger": "#D55E00", "history": "#FFFFFF59", "sensor": "#0072B2"}
 DRAW_CHUNK_BYTES = 12 * 1024
 NO_RETURN = 0xFFFF
+DEFAULT_OPACITY = 0.5
 _LINES, _POINTS, _ARROWS, _SHAPES, _TRIANGLES, _TEXT, _AXES = range(1, 8)
 _POLYGON, _GRID, _GHOST, _PANEL, _MESH, _INTERACT = range(8, 14)
 _SECTIONS = ("points", "colors", "radii", "offsets", "instances", "values", "rings", "qpoints", "ranges", "cells",
@@ -936,9 +939,9 @@ _SECTIONS = ("points", "colors", "radii", "offsets", "instances", "values", "rin
 _SECTION_FMT = {"points": "f", "colors": "I", "radii": "f", "offsets": "I", "instances": "f", "values": "f",
                 "rings": "I", "qpoints": "h", "ranges": "H", "cells": "B"}
 _DRAW_FLOATS = ("lifetime_s", "px", "py", "pz", "qw", "qx", "qy", "qz", "sx", "sy", "sz", "width", "glow",
-                "pulse_hz", "flow_speed", "dash", "beam_height", "fade", "urgency", "vmin", "vmax", "quant")
+                "pulse_hz", "flow_speed", "dash", "beam_height", "fade", "urgency", "opacity", "vmin", "vmax", "quant")
 _DRAW_HEADER = _DRAW_FLOATS + ("op", "kind", "sub", "flags", "style", "seq", "chunk_offset", "last", "color",
-                               "color2", "colormap", "_pad")
+                               "color2", "colormap")
 _DRAW_FIELDS = _DRAW_HEADER + tuple(f"{s}_{p}" for s in _SECTIONS for p in ("offset", "len"))
 # rviz_visual_tools colour names on the Okabe-Ito palette (see `Color`).
 _NAMED_COLORS = {
@@ -969,7 +972,7 @@ def _draw_entity_class():
 
     body["section"] = section
     body["props"] = property(lambda self: unpack_map(self.section("props")))
-    return _pod("gearbox.draw.v1", "<8d14f12I" + "II" * len(_SECTIONS), _DRAW_FIELDS, payload="payload")(
+    return _pod("gearbox.draw.v1", "<8d15f11I" + "II" * len(_SECTIONS), _DRAW_FIELDS, payload="payload")(
         type("DrawEntity", (), body))
 
 
@@ -1605,6 +1608,8 @@ class Draw:
     Every kind accepts `blur` in 0..1: zero keeps the transmitted background
     clear; one applies full frost. Omission preserves the existing finish.
     Text, geometry, data and glow remain independent of this background filter.
+    Every kind takes `opacity` in 0..1 for the whole drawing; None or 0 is
+    `DEFAULT_OPACITY` (0.5), 1 fully opaque.
     Every kind takes a `style` and its effect parameters `glow`, `pulse_hz`,
     `flow_speed`, `spacing`, `beam_height`, `fade` and `urgency` (None or 0
     the style's default, < 0 off). "auto" (the default) picks the style by
@@ -1673,7 +1678,7 @@ class Draw:
               labels=None, sub: int = 0, flags: int = 0, scale=(1.0, 1.0, 1.0), wait: bool | None = None,
               style: str = "auto", glow: float | None = None, blur: float | None = None, pulse_hz: float | None = None,
               flow_speed: float | None = None, spacing: float | None = None, beam_height: float | None = None,
-              fade: float | None = None, urgency: float | None = None, flat: bool = False,
+              fade: float | None = None, urgency: float | None = None, opacity: float | None = None, flat: bool = False,
               additive: bool = False, drape: bool | None = None, colormap=None, vmin: float = 0.0,
               vmax: float = 0.0, arrow_tip: bool = False, props: dict | None = None,
               label_category: str | None = None, label_detail: str | None = None,
@@ -1694,6 +1699,7 @@ class Draw:
                      sx=float(scale[0]), sy=float(scale[1]), sz=float(scale[2]), width=float(width or 0.0),
                      glow=effect(glow), pulse_hz=effect(pulse_hz), flow_speed=effect(flow_speed),
                      dash=effect(spacing), beam_height=effect(beam_height), fade=effect(fade), urgency=effect(urgency),
+                     opacity=effect(opacity),
                      vmin=float(vmin), vmax=float(vmax), quant=0.0, colormap=cmap,
                      sub=sub, flags=flags, style=DRAW_STYLE[style] if isinstance(style, str) else int(style),
                      color=(rgba(color, alpha) or 1) if color is not None else 0,
@@ -1892,7 +1898,7 @@ class Draw:
 
     def update(self, ns: str, id: str, *, pose=None, scale=None, color=None, alpha=None, color2=None,
                width=None, style=None, glow=None, blur=None, pulse_hz=None, flow_speed=None, spacing=None, beam_height=None,
-               fade=None, urgency=None, flags=None, colormap=None, vmin=None, vmax=None, lifetime=None,
+               fade=None, urgency=None, opacity=None, flags=None, colormap=None, vmin=None, vmax=None, lifetime=None,
                wait: bool | None = None, **props) -> Status | None:
         """Change the live entity's header only, keeping its points: what is
         given here (pose, colour, width, style, effects, colormap,
@@ -1924,7 +1930,7 @@ class Draw:
             header["style"] = DRAW_STYLE[style] if isinstance(style, str) else int(style)
             groups.append("style")
         effects = dict(glow=glow, pulse_hz=pulse_hz, flow_speed=flow_speed, dash=spacing, beam_height=beam_height,
-                       fade=fade, urgency=urgency)
+                       fade=fade, urgency=urgency, opacity=opacity)
         for key, value in effects.items():
             if value is not None:
                 header[key] = float(value)
@@ -2833,6 +2839,22 @@ class Draw:
                                  self._world_lines(root, "marker", marker, color, anchored),
                                  self._world_lines(root, "leader", leader, color, anchored),
                                  self._world_label(root, (0.75 * radius, 0.0, 2 * radius), label, color, anchored)])
+
+    def machine_ring(self, ns: str, id: str, centre=(0.0, 0.0, 0.0), *, radius: float = 2.0,
+                     mark: str = "selected", color=None, **common) -> Status | None:
+        """A machine's ring on the ground, its rim `radius` metres from `centre` (z its height):
+        one `ring` style soft off-white band in four arcs with faint gaps, fainter for `hover`,
+        closed with a thin outer line when `following`. No color takes the mark's own."""
+        if mark not in RING_MARKS:
+            raise ValueError(f"unknown ring mark {mark!r}; choose {', '.join(RING_MARKS)}")
+        root, centre, radius = f"{ns.rstrip('/')}/{id}", _world_point(centre), _world_f32(radius)
+        if not _world_finite(centre) or not math.isfinite(radius) or radius < RING_MIN_RADIUS:
+            return self._world_send(self._world_clear(root, ["ring"], common))
+        tint = (rgba(color, common.get("alpha")) if color is not None else 0) or RING_MARKS[mark]
+        spec = self._spec(_POINTS, root, "ring", **{**common, "style": "ring", "width": 2.0 * radius, "color": tint,
+                                                     "props": {**common.get("props", {}), "mark": mark}})
+        spec.points = list(centre)
+        return self._world_send([(spec, DRAW_OP["upsert"])])
 
     def clearance_box(self, ns: str, id: str, pose=(0.0, 0.0, 0.0), *, size=(1.0, 1.0, 1.0),
                       color="plan", label: str = "", **common) -> Status | None:

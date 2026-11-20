@@ -9,7 +9,7 @@ import gearbox::draw::draw_common::{srgb_to_linear, display_to_scene, technical_
 // added with no alpha.
 
 struct SurfaceParams {
-    // Shading flag, frost strength, unused, unused.
+    // Shading flag, frost strength, opacity, unused.
     flags: vec4<f32>,
 };
 
@@ -29,6 +29,7 @@ const LOOK_GHOST: u32 = 10u;
 const LOOK_PLANE: u32 = 11u;
 const LOOK_ZONE: u32 = 12u;
 const LOOK_FIELD: u32 = 13u;
+const LOOK_MACHINE: u32 = 14u;
 const TAU: f32 = 6.2831853;
 
 struct Vertex {
@@ -62,7 +63,7 @@ fn vertex(v: Vertex) -> VertexOutput {
     let look = u32(v.fx.x + 0.5);
     let at_eye = view.view_from_world * world;
     out.position = view.clip_from_view * at_eye;
-    if look == LOOK_RING || look == LOOK_DECAL || look == LOOK_ALERT || look == LOOK_ZONE
+    if look == LOOK_RING || look == LOOK_DECAL || look == LOOK_ALERT || look == LOOK_ZONE || look == LOOK_MACHINE
         || (look == LOOK_SWEEP && v.local.w > 0.5) {
         out.position = ground_clip(at_eye, view.clip_from_view);
     }
@@ -168,6 +169,21 @@ fn surface(in: VertexOutput, front: bool) -> vec4<f32> {
         let activity = max(energy_packet(turn - time * hz, 0.045, fwidth(turn), hz) * core, ripples);
         let coverage = 0.48 * structure + 0.16 * activity;
         return energy_coat(base, in.color.a * edge_fade, 0.8, coverage, 0.0, structure, activity, 0.0, glow);
+    } else if look == LOOK_MACHINE {
+        // Machine ring: a band inside the rim in four strong arcs with faint
+        // gaps; following (mark 2) closes the gaps and adds a thin outer line.
+        let lock = select(0.0, 1.0, in.fx2.w > 1.5);
+        let ring = size / 1.15;
+        let quarter = atan2(p.y, p.x) / TAU * 4.0;
+        let quarter_w = min(fwidth(quarter), fwidth(fract(quarter + 0.5)));
+        let strong = max(band(quarter, 0.75, quarter_w), lock);
+        let w = max(r_w, 1e-4);
+        let inside = clamp((ring - r) / w + 0.5, 0.0, 1.0);
+        let wide = clamp((r - ring + 0.16) / w + 0.5, 0.0, 1.0) * inside;
+        let thin = clamp((r - ring + 0.055) / w + 0.5, 0.0, 1.0) * inside;
+        let outer = lock * clamp((r - ring - 0.05) / w + 0.5, 0.0, 1.0) * clamp((ring + 0.08 - r) / w + 0.5, 0.0, 1.0);
+        let a = max(wide * strong + 0.3 * thin * (1.0 - strong), outer) * in.color.a;
+        return vec4(base * a, a);
     } else if look == LOOK_BEAM {
         let h = clamp(in.local.y, 0.0, 1.0);
         let fall = exp(-h * 2.1) * (1.0 - smoothstep(0.82, 1.0, h));
@@ -311,5 +327,5 @@ fn surface(in: VertexOutput, front: bool) -> vec4<f32> {
 
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    return background_frost(surface(in, front), in.position.xy, params.flags.y);
+    return background_frost(surface(in, front), in.position.xy, params.flags.y) * params.flags.z;
 }
