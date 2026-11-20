@@ -703,11 +703,16 @@ simulated-time rate (payloads in CONTROLLER_SPEC §9.7).
   axes: +X forward, +Y left, +Z up. Under a chassis that faces −Y, rotate the
   link −90° about Z.
 - The sensor rides the body of the nearest link at or above it that has a
-  rigid body. A sensor link with no such ancestor, or a `position` sensor
-  without a joint between its body and its parent link's body, stops **every**
-  sensor of the machine (runtime error, not a rejection).
+  rigid body. A sensor link with no such ancestor, a non-finite mount, or a
+  `position` sensor without a joint between its body and its parent link's
+  body is skipped with a runtime error (logged once per scene revision) while
+  healthy sibling sensor links continue running.
 - Sensors need a GPU render device.
-- `gearbox:sensor:*` on a link whose role is not `sensor` is ignored.
+- `gearbox:sensor:*` on a link whose role is not `sensor` is ignored, except
+  `gearbox:sensor:label` (recognition label override on any prim) and
+  `gearbox:radar:crossSection` (radar cross-section in m² on any rigid body
+  prim; positive overrides the 1 m² dynamic default or opts a fixed/kinematic
+  body in as a static reflector, 0 opts a body out).
 
 ### 13.1 Kind
 
@@ -753,12 +758,19 @@ Numeric attributes may be any number type; "whole" means no fractional part.
 | `gearbox:sensor:range_m` | distance, radar | 10, 50 | `> 0`, finite. |
 | `gearbox:sensor:range_m` | receiver, emitter | unlimited | `> 0`; a negative value means unlimited. |
 | `gearbox:sensor:width`, `height` | camera | 128, 96 | Pixels, whole `1..=4096`. |
-| `gearbox:sensor:render` | camera | `optimized` (`geometry` for a range finder) | `optimized` (or `optimised`): Bevy render of the visual scene without grass, clouds, bloom or multisampling. `full`: Bevy render with grass, bloom and multisampling. `geometry`: Molla trace of the collision shapes with a flat colour per shape. |
+| `gearbox:sensor:render` | camera | `optimized` (`geometry` for a range finder) | `optimized` (or `optimised`): Bevy render of the visual scene without grass, clouds, clustered lamps, bloom or multisampling. `full`: Bevy render with grass, bloom, multisampling, and bounded clustered point/spot lighting when lamps exist. Both follow the weather's clear colour. `geometry`: Molla trace of the collision shapes with a flat colour per shape. |
 | `gearbox:sensor:channels` | camera | `color_depth` (`depth` for a range finder) | `color` (or `colour`), `depth`, `color_depth` (or `colour_depth`). Depth always comes from the Molla trace of the collision shapes. |
-| `gearbox:sensor:recognition` | camera | false | Bool. Also stream the objects in view. |
+| `gearbox:sensor:recognition` | camera | false | Bool. Also stream the objects in view (GPU-accelerated bounding/visibility reduction via `AnnotationProcessor`). |
+| `gearbox:sensor:lens_diameter_m` | camera | 0 | `≥ 0`, finite. Thin-lens entrance aperture for Molla `geometry` cameras; 0 is a pinhole. |
+| `gearbox:sensor:focal_distance_m` | camera | 0 | `≥ 0`, finite (`> 0` required when `lens_diameter_m > 0`). Focus plane distance (m). |
+| `gearbox:sensor:aperture_samples` | camera | 1 | Whole `1..=1024`. Thin-lens aperture samples per pixel on GPU. |
 | `gearbox:sensor:rays` | distance | 1 | Whole `1..=64`: the axis, then a ring at half the aperture. |
 | `gearbox:sensor:aperture_deg` | distance, receiver, emitter | 0 (distance), 90 (radio links) | Full cone, `[0, 360]`. |
 | `gearbox:sensor:min_range_m` | radar | 1 | `[0, range_m)`. |
+| `gearbox:sensor:min_radial_speed_mps` | radar | 0 | `≥ 0`, finite. Targets slower than this absolute radial speed (m/s) are dropped. |
+| `gearbox:sensor:frequency_ghz` | radar | 24 | `> 0`, finite. Carrier frequency (GHz) for radar-equation received power. |
+| `gearbox:sensor:tx_power_dbm` | radar | 1 | Finite. Transmitted power (dBm). |
+| `gearbox:sensor:occlusion` | radar | true | Bool. Drop targets whose line of sight is blocked. |
 | `gearbox:sensor:channel` | receiver, emitter | 0 | Whole `≥ -1`; −1 hears and reaches every channel. |
 
 Radio reaches receivers on its channel within range; infra-red also needs

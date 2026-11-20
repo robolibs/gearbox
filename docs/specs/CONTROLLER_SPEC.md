@@ -717,7 +717,7 @@ its own simulated-time rate.
 | `light` | `[irradiance, direct, sky (W/m²), visible sources, value]` facing +X; sources are the sun and every point and spot light, at 93 lm/W, and the sky is 0 under a roof |
 | `climate` | `[temperature °C, relative humidity 0..1, CO2 ppm, O2 kPa, pressure kPa]` of the greenhouse room the link is in, else the planet's air (GREENHOUSE_SPEC §4) |
 | `position` | `[position (rad or m), velocity]` of the joint between the link's body and its parent link's body |
-| `radar` | per target `[distance, azimuth, elevation, radial speed, received power dBm]`, nearest first; dynamic bodies not of this machine are targets |
+| `radar` | per target `[distance, azimuth, elevation, radial speed, received power dBm]`, nearest first; dynamic bodies not of this machine default to 1 m² RCS, overridden by `gearbox:radar:crossSection` (0 opts out; positive on fixed/kinematic bodies acts as a static reflector) |
 | `touch` | `[touching 0/1, contacts, force N, fx, fy, fz]` on the link's body |
 | `receiver` | one packet `[channel, signal strength, dx, dy, dz]` (unit direction to the emitter); payload in `data`, emitter `<machine>/<link>` in props `from` |
 | `recognition` (camera with `recognition`) | per object `[id, pixels, left, top, right, bottom, x, y, z, sx, sy, sz]` in camera axes (−Z forward, +Y up); labels in props `names`, one per line (greenhouse plants as `plant:TRAY/SLOT`) |
@@ -789,9 +789,7 @@ Every registered device streams `gearbox.measurement.v1` on
 - A closed kinematic loop of joints without `excludeFromArticulation` is an
   `unclassified_cycle` error: the machine is rejected and its joints are not
   built (ROBOT_CONTRACT §5).
-- One bad sensor link (no rigid-body ancestor, a position sensor without a
-  joint) stops every sensor of the machine; one device that never registers
-  stops every device of the machine (M§12.1).
+- One device that never registers stops every device of the machine (M§12.1).
 - `tyre_axle` errors disable every tyre of the machine (M§8.4).
 - In the legacy steering path a runtime steer servo, once written, is taken
   for an authored Force drive on the next frame, so its gains and torque cap

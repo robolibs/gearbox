@@ -117,14 +117,33 @@ fn target_image(spec: &SensorSpec) -> Image {
     image
 }
 
-/// Background for rays that reach the sky: sensor cameras do not draw the
-/// viewer's cloud skybox, which is rendered from the viewer's own position.
+/// Background fallback when no weather plugin maintains `ClearColor`.
 const SKY: Color = Color::srgb(0.53, 0.70, 0.90);
+/// Maximum clustered point/spot light reach for `full` sensor cameras (m).
+const CLUSTERED_REACH_M: f32 = 120.0;
+
+fn cluster_config_for(spec: &SensorSpec, has_lamps: bool) -> bevy::light::cluster::ClusterConfig {
+    use bevy::light::cluster::{ClusterConfig, ClusterFarZMode, ClusterZConfig};
+    if spec.render == CameraRender::Full && has_lamps {
+        ClusterConfig::FixedZ {
+            total: 2048,
+            z_slices: 16,
+            z_config: ClusterZConfig {
+                first_slice_depth: 1.0,
+                far_z_mode: ClusterFarZMode::Constant(spec.range_m.clamp(1.0, CLUSTERED_REACH_M)),
+            },
+            dynamic_resizing: true,
+        }
+    } else {
+        ClusterConfig::None
+    }
+}
 
 fn spawn_camera(
     commands: &mut Commands,
     images: &mut Assets<Image>,
     weather: Option<&bevy_weather::WeatherSettings>,
+    has_lamps: bool,
     job: &RenderJob,
     parent: Entity,
     order: isize,
@@ -137,6 +156,11 @@ fn spawn_camera(
         far: job.spec.range_m.max(1.0),
         ..default()
     });
+    let clear_color = if weather.is_some() {
+        ClearColorConfig::Default
+    } else {
+        ClearColorConfig::Custom(SKY)
+    };
     let mut camera = commands.spawn((
         Name::new(format!("sensor camera {}", job.key.link)),
         Camera3d::default(),
@@ -144,14 +168,13 @@ fn spawn_camera(
         Camera {
             is_active: false,
             order,
-            clear_color: ClearColorConfig::Custom(SKY),
+            clear_color,
             ..default()
         },
         RenderTarget::Image(image.clone().into()),
         projection,
         camera_in_link(),
-        // A sensor image sees by the sun and the sky; no lamps clustered.
-        bevy::light::cluster::ClusterConfig::None,
+        cluster_config_for(&job.spec, has_lamps),
         bevy_weather::WeatherOptOut,
         SensorCamera {
             key: job.key.clone(),
@@ -178,20 +201,36 @@ fn spawn_camera(
     camera.id()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn drive_sensor_cameras(
     mut commands: Commands,
     mut queue: ResMut<SensorRenderQueue>,
     mut state: ResMut<SensorCameras>,
     mut images: ResMut<Assets<Image>>,
-    mut cameras: Query<(Entity, &mut Camera, &mut SensorCamera)>,
+    mut cameras: Query<(
+        Entity,
+        &mut Camera,
+        &mut SensorCamera,
+        Option<&mut bevy::light::cluster::ClusterConfig>,
+    )>,
+    lights: Query<(), Or<(With<PointLight>, With<SpotLight>)>>,
     weather: Option<Res<bevy_weather::WeatherSettings>>,
     time: Res<Time>,
 ) {
     let state = &mut *state;
+    let has_lamps = !lights.is_empty();
     // Hosts may switch every camera on before each update, so each frame
     // starts with all sensor cameras off; only due samples render.
-    for (entity, mut camera, mut sensor) in &mut cameras {
+    for (entity, mut camera, mut sensor, cluster) in &mut cameras {
         camera.is_active = false;
+        if let Some(mut cluster) = cluster {
+            let want = cluster_config_for(&sensor.spec, has_lamps);
+            let is_clustered = !matches!(*cluster, bevy::light::cluster::ClusterConfig::None);
+            let want_clustered = !matches!(want, bevy::light::cluster::ClusterConfig::None);
+            if is_clustered != want_clustered {
+                *cluster = want;
+            }
+        }
         if sensor.armed {
             sensor.armed = false;
             commands.entity(entity).remove::<Readback>();
@@ -212,9 +251,9 @@ fn drive_sensor_cameras(
         let Some(parent) = job.entity else { continue };
         let existing = state.cameras.get(&job.key).copied();
         let reusable = existing.and_then(|entity| cameras.get_mut(entity).ok()).filter(
-            |(_, _, sensor)| sensor.spec == job.spec && sensor.parent == parent,
+            |(_, _, sensor, _)| sensor.spec == job.spec && sensor.parent == parent,
         );
-        let Some((_, mut camera, mut sensor)) = reusable else {
+        let Some((_, mut camera, mut sensor, _)) = reusable else {
             if let Some(stale) = existing {
                 commands.entity(stale).despawn();
             }
@@ -223,6 +262,7 @@ fn drive_sensor_cameras(
                 &mut commands,
                 &mut images,
                 weather.as_deref(),
+                has_lamps,
                 &job,
                 parent,
                 order,
@@ -406,10 +446,17 @@ mod tests {
             .add_plugins(SensorCamerasPlugin);
         let key = CameraKey { bus_key: "rig".into(), link: "camera".into() };
         let parent = app.world_mut().spawn_empty().id();
-        let spec = SensorSpec { kind: crate::links::SensorKind::Camera, rate_hz: 2.0,
-            columns: 1, rows: 1, hfov: 1.0, vfov: 1.0, range_m: 20.0, width: 160, height: 120,
-            render: CameraRender::Full, color: true, depth: false, recognition: false,
-            variant: crate::links::SensorVariant::Default, rays: 1, aperture: 0.0, min_range_m: 0.0, channel: -1 };
+        let spec = SensorSpec {
+            rate_hz: 2.0,
+            vfov: 1.0,
+            range_m: 20.0,
+            width: 160,
+            height: 120,
+            render: CameraRender::Full,
+            color: true,
+            depth: false,
+            ..SensorSpec::defaults(crate::links::SensorKind::Camera, false)
+        };
         let entity = app.world_mut().spawn((Camera { is_active: false, ..default() },
             SensorCamera { key: key.clone(), link_index: 0, spec,
                 image: Handle::default(), parent, pending: VecDeque::new(), armed: false },
@@ -457,5 +504,76 @@ mod tests {
         let t = camera_in_link();
         assert!((t.rotation * Vec3::NEG_Z - Vec3::X).length() < 1e-6);
         assert!((t.rotation * Vec3::Y - Vec3::Z).length() < 1e-6);
+    }
+
+    #[test]
+    fn full_cameras_cluster_only_when_lamps_exist_and_follow_weather_clear_color() {
+        use bevy::light::cluster::{ClusterConfig, ClusterFarZMode};
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<bevy_weather::WeatherSettings>()
+            .add_plugins(SensorCamerasPlugin);
+
+        let parent = app.world_mut().spawn_empty().id();
+        let full_key = CameraKey { bus_key: "rig".into(), link: "full_cam".into() };
+        let opt_key = CameraKey { bus_key: "rig".into(), link: "opt_cam".into() };
+        let full_spec = SensorSpec {
+            render: CameraRender::Full,
+            range_m: 45.0,
+            ..SensorSpec::defaults(crate::links::SensorKind::Camera, false)
+        };
+        let opt_spec = SensorSpec {
+            render: CameraRender::Optimized,
+            range_m: 45.0,
+            ..SensorSpec::defaults(crate::links::SensorKind::Camera, false)
+        };
+        {
+            let mut queue = app.world_mut().resource_mut::<SensorRenderQueue>();
+            queue.live.insert(full_key.clone());
+            queue.live.insert(opt_key.clone());
+            queue.jobs.push(RenderJob {
+                key: full_key.clone(),
+                link_index: 1,
+                spec: full_spec,
+                entity: Some(parent),
+                sample: 1,
+                sim_time: 0.0,
+                stamp_ms: 0,
+            });
+            queue.jobs.push(RenderJob {
+                key: opt_key.clone(),
+                link_index: 2,
+                spec: opt_spec,
+                entity: Some(parent),
+                sample: 1,
+                sim_time: 0.0,
+                stamp_ms: 0,
+            });
+        }
+        app.update();
+
+        let full_e = app.world().resource::<SensorCameras>().cameras[&full_key];
+        let opt_e = app.world().resource::<SensorCameras>().cameras[&opt_key];
+        assert!(matches!(app.world().get::<Camera>(full_e).unwrap().clear_color, ClearColorConfig::Default));
+        assert!(matches!(app.world().get::<ClusterConfig>(full_e).unwrap(), ClusterConfig::None));
+        assert!(matches!(app.world().get::<ClusterConfig>(opt_e).unwrap(), ClusterConfig::None));
+
+        // Adding a lamp enables bounded clustering on Full only.
+        let lamp = app.world_mut().spawn(PointLight::default()).id();
+        app.update();
+        match app.world().get::<ClusterConfig>(full_e).unwrap() {
+            ClusterConfig::FixedZ { z_config, .. } => {
+                assert!(matches!(z_config.far_z_mode, ClusterFarZMode::Constant(r) if (r - 45.0).abs() < 1e-4));
+            }
+            other => panic!("expected FixedZ cluster config, got {other:?}"),
+        }
+        assert!(matches!(app.world().get::<ClusterConfig>(opt_e).unwrap(), ClusterConfig::None));
+
+        // Removing the lamp drops clustering back to None.
+        app.world_mut().despawn(lamp);
+        app.update();
+        assert!(matches!(app.world().get::<ClusterConfig>(full_e).unwrap(), ClusterConfig::None));
     }
 }

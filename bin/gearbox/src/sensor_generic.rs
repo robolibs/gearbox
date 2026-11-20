@@ -5,7 +5,8 @@
 //! Molla's sensor models compute every reading. Gearbox supplies what only
 //! the environment knows: its site frame and where each site sits on the
 //! planet, the sun, and this step's contact forces. Distance, light and
-//! radar rays are cast on the CPU against the live rigid scene.
+//! radar rays are planned here and cast asynchronously on the GPU against
+//! the shared [`molla_sensors::SensorScene`] (with CPU fallback for tests).
 
 use std::collections::HashMap;
 
@@ -14,11 +15,13 @@ use molla_core::BodyId as MollaBodyId;
 use molla_math::{Real, Transform as MTransform, Vec3 as MVec3};
 use molla_sensors::{
     ContactForceSample, CpuRaycaster, DistanceKind, DistanceSensors, DistanceSpec, GeoReference,
-    Geodetic, Gps, LightEnvironment, LightSensors, RadarSpec, RadarTarget, Radars,
-    RecognizedObject, RigidRays, TouchKind, TouchSensor, WorldFrame, compass, inertial_unit,
+    Geodetic, Gps, INVALID_SCENE_INDEX, JointReading, LightEnvironment, LightSensors, LightSource,
+    NearestHit, RadarDetection, RadarSpec, RadarTarget, Radars, RayQuery, RecognizedObject,
+    RigidRays, TouchKind, TouchSensor, WorldFrame, compass, cone_rays, inertial_unit,
     joint_reading,
 };
 use molla_sim::runtime::RigidScene;
+use molla_sim::{Model, State};
 
 use crate::links::{SensorKind, SensorSpec, SensorVariant};
 
@@ -123,11 +126,99 @@ impl AirField {
 
 /// How far up a light sensor looks for a roof between it and the sky (m).
 const SKY_REACH: Real = 200.0;
+/// How far a directional light's shadow ray looks for occluders (m), matching
+/// `molla_sensors::LightSensors`.
+const SHADOW_REACH: Real = 10_000.0;
 
 /// Whether nothing stands between `at` and the sky.
 fn open_sky(rays: &mut RigidRays<'_>, at: MVec3, up: MVec3) -> Result<bool, String> {
     let hits = molla_sensors::RayQuery::cast(rays, &[at + up * 1e-3], &[up], SKY_REACH).map_err(|e| e.to_string())?;
     Ok(hits.first().is_none_or(|hit| hit.t >= SKY_REACH))
+}
+
+/// Ray query that serves a precomputed slice of GPU raycast hits.
+struct SliceRays<'a> {
+    hits: &'a [NearestHit],
+}
+
+impl RayQuery for SliceRays<'_> {
+    fn cast(
+        &mut self,
+        origins: &[MVec3],
+        _directions: &[MVec3],
+        _max_distance: Real,
+    ) -> molla_core::Result<Vec<NearestHit>> {
+        if origins.len() > self.hits.len() {
+            return Err(molla_core::Error::Solver(
+                "generic ray replay: fewer hits than requested rays".into(),
+            ));
+        }
+        let (head, tail) = self.hits.split_at(origins.len());
+        self.hits = tail;
+        Ok(head.to_vec())
+    }
+}
+
+/// Ray query that reports all rays unoccluded (used when pre-filtering radar
+/// candidates with `occlusion: false`).
+struct NoopRays;
+
+impl RayQuery for NoopRays {
+    fn cast(
+        &mut self,
+        origins: &[MVec3],
+        _directions: &[MVec3],
+        _max_distance: Real,
+    ) -> molla_core::Result<Vec<NearestHit>> {
+        Ok(vec![NearestHit::MISS; origins.len()])
+    }
+}
+
+/// A batch of rays planned for due distance, light and radar sensors, ready to
+/// encode in one GPU `Raycaster::encode_scene` call and resolve on readback.
+#[derive(Default)]
+pub struct PendingRayPlan {
+    pub origins: Vec<MVec3>,
+    pub directions: Vec<MVec3>,
+    pub max_distance: Real,
+    entries: Vec<PendingRayEntry>,
+}
+
+impl PendingRayPlan {
+    pub fn is_empty(&self) -> bool {
+        self.origins.is_empty()
+    }
+}
+
+enum PendingRayEntry {
+    Distance {
+        mount: usize,
+        name: String,
+        link_index: u32,
+        sample: u64,
+        world: MTransform,
+        offset: usize,
+        count: usize,
+    },
+    Light {
+        mount: usize,
+        name: String,
+        link_index: u32,
+        sample: u64,
+        world: MTransform,
+        light: LightEnvironment,
+        sky_ray: Option<usize>,
+        shadow_offset: usize,
+        shadow_count: usize,
+    },
+    Radar {
+        mount: usize,
+        name: String,
+        link_index: u32,
+        sample: u64,
+        candidates: Vec<RadarDetection>,
+        offset: usize,
+    },
 }
 
 /// A measurement before its publish stamp.
@@ -221,18 +312,21 @@ fn radar_spec(spec: &SensorSpec) -> RadarSpec {
         max_range: spec.range_m as Real,
         horizontal_fov: spec.hfov as Real,
         vertical_fov: spec.vfov as Real,
-        ..Default::default()
+        min_radial_speed: spec.min_radial_speed_mps as Real,
+        frequency_ghz: spec.frequency_ghz as Real,
+        transmitted_power_dbm: spec.tx_power_dbm as Real,
+        occlusion: spec.occlusion,
     }
 }
 
 impl GenericSensors {
     /// Batches for the generic mounts among `specs`. `joints` gives the
     /// Molla joint index of each position mount; `targets` are the bodies a
-    /// radar may detect.
+    /// radar may detect with their cross-sections.
     pub fn build(
         specs: &[SensorSpec],
         joints: HashMap<usize, usize>,
-        targets: Vec<MollaBodyId>,
+        targets: Vec<RadarTarget>,
     ) -> Result<Self, String> {
         let mut distance = HashMap::new();
         for (mount, spec) in specs.iter().enumerate().filter(|(_, s)| s.kind == SensorKind::Distance) {
@@ -245,20 +339,366 @@ impl GenericSensors {
             distance,
             light: LightSensors::host(vec![Vec::new()]),
             radar: Radars::host(),
-            radar_targets: targets
-                .into_iter()
-                .map(|body| RadarTarget {
-                    body,
-                    cross_section: 1.0,
-                })
-                .collect(),
+            radar_targets: targets,
             joints,
             caster: CpuRaycaster::default(),
         })
     }
 
+    pub fn set_radar_targets(&mut self, targets: Vec<RadarTarget>) {
+        self.radar_targets = targets;
+    }
+
+    pub fn radar_target_count(&self) -> usize {
+        self.radar_targets.len()
+    }
+
+    /// Evaluates non-ray generic sensors immediately and packs all rays for
+    /// due distance, light and radar sensors into a single GPU [`PendingRayPlan`].
+    /// `read_joint` is called only when a `position` sensor is due.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_and_plan_rays(
+        &mut self,
+        imu_model: &Model,
+        state: &State,
+        read_joint: &mut dyn FnMut(usize) -> Result<JointReading, String>,
+        environment: &SensorEnvironment,
+        due: &[GenericSample<'_>],
+        sim_time: f64,
+    ) -> Result<(Vec<(usize, Measurement)>, PendingRayPlan), String> {
+        let mut ready = Vec::new();
+        let mut plan = PendingRayPlan::default();
+        let make = |s: &GenericSample<'_>, k: u32, values: Vec<f64>| {
+            (s.mount, measurement(s.name, s.link_index, k, sim_time, s.sample, values))
+        };
+        for s in due {
+            let rotation = s.world.rotation;
+            match s.spec.kind {
+                SensorKind::Distance => {
+                    if !self.distance.contains_key(&s.mount) {
+                        continue;
+                    }
+                    let rays = cone_rays(s.spec.rays.max(1), s.spec.aperture as Real);
+                    let offset = plan.origins.len();
+                    for ray in &rays {
+                        plan.origins.push(s.world.position);
+                        plan.directions.push(s.world.rotation * *ray);
+                    }
+                    plan.max_distance = plan.max_distance.max(s.spec.range_m as Real);
+                    plan.entries.push(PendingRayEntry::Distance {
+                        mount: s.mount,
+                        name: s.name.to_string(),
+                        link_index: s.link_index,
+                        sample: s.sample,
+                        world: s.world,
+                        offset,
+                        count: rays.len(),
+                    });
+                }
+                SensorKind::Light => {
+                    let at = s.world.position;
+                    let mut light = environment.light.clone();
+                    light
+                        .sources
+                        .extend(environment.lamps.iter().filter_map(|lamp| lamp.seen_from(at)));
+                    let sky_ray = if light.sky > 0.0 {
+                        let idx = plan.origins.len();
+                        plan.origins.push(at + light.up * 1e-3);
+                        plan.directions.push(light.up);
+                        plan.max_distance = plan.max_distance.max(SKY_REACH);
+                        Some(idx)
+                    } else {
+                        None
+                    };
+                    let normal = rotation * MVec3::X;
+                    let shadow_offset = plan.origins.len();
+                    for source in &light.sources {
+                        let dir = match *source {
+                            LightSource::Directional { towards, .. } => towards.normalize(),
+                            LightSource::Point { position, .. } => (position - at).normalize_or_zero(),
+                        };
+                        plan.origins.push(at + normal * 1e-3);
+                        plan.directions.push(if dir == MVec3::ZERO { normal } else { dir });
+                    }
+                    let shadow_count = plan.origins.len() - shadow_offset;
+                    if shadow_count > 0 {
+                        plan.max_distance = plan.max_distance.max(SHADOW_REACH);
+                    }
+                    if sky_ray.is_none() && shadow_count == 0 {
+                        let r = self
+                            .light
+                            .update_with(&mut NoopRays, &[s.world], &light)
+                            .map_err(|e| format!("light `{}`: {e}", s.name))?[0];
+                        ready.push(make(
+                            s,
+                            kind::LIGHT,
+                            vec![r.irradiance, r.direct, r.sky, r.visible as f64, r.value],
+                        ));
+                    } else {
+                        plan.entries.push(PendingRayEntry::Light {
+                            mount: s.mount,
+                            name: s.name.to_string(),
+                            link_index: s.link_index,
+                            sample: s.sample,
+                            world: s.world,
+                            light,
+                            sky_ray,
+                            shadow_offset,
+                            shadow_count,
+                        });
+                    }
+                }
+                SensorKind::Radar => {
+                    let spec = radar_spec(&s.spec);
+                    let candidates = self
+                        .radar
+                        .update_with(
+                            &mut NoopRays,
+                            imu_model,
+                            state,
+                            &RadarSpec {
+                                occlusion: false,
+                                ..spec
+                            },
+                            s.world,
+                            s.body,
+                            &self.radar_targets,
+                        )
+                        .map_err(|e| format!("radar `{}`: {e}", s.name))?;
+                    if !spec.occlusion || candidates.is_empty() {
+                        let values = candidates
+                            .iter()
+                            .flat_map(|d| {
+                                [d.distance, d.azimuth, d.elevation, d.radial_speed, d.received_power_dbm]
+                            })
+                            .collect();
+                        ready.push(make(s, kind::RADAR, values));
+                    } else {
+                        let body_q = state.body_q.host().map_err(|e| e.to_string())?;
+                        let body_com = imu_model.body_com.host().map_err(|e| e.to_string())?;
+                        let offset = plan.origins.len();
+                        for d in &candidates {
+                            let i = d.body.index();
+                            let dir = (body_q[i].transform_point(body_com[i]) - s.world.position) / d.distance;
+                            plan.origins.push(s.world.position);
+                            plan.directions.push(dir);
+                        }
+                        plan.max_distance = plan.max_distance.max(spec.max_range);
+                        plan.entries.push(PendingRayEntry::Radar {
+                            mount: s.mount,
+                            name: s.name.to_string(),
+                            link_index: s.link_index,
+                            sample: s.sample,
+                            candidates,
+                            offset,
+                        });
+                    }
+                }
+                SensorKind::InertialUnit => {
+                    let r = inertial_unit(&SITE_FRAME, rotation);
+                    let q = r.orientation;
+                    ready.push(make(s, kind::INERTIAL_UNIT, vec![r.roll, r.pitch, r.yaw, q.x, q.y, q.z, q.w]));
+                }
+                SensorKind::Compass => {
+                    let r = compass(&SITE_FRAME, rotation);
+                    ready.push(make(s, kind::COMPASS, vec![r.north.x, r.north.y, r.north.z, r.heading_rad]));
+                }
+                SensorKind::Gps => {
+                    let p = s.world.position;
+                    let (region, local) = crate::globe::site_local(p.x, p.y, p.z);
+                    let Some(origin) = crate::globe::earth_place(region, [0.0; 3]) else {
+                        continue;
+                    };
+                    let reference = GeoReference {
+                        origin: Geodetic {
+                            latitude_deg: origin.geodetic.latitude,
+                            longitude_deg: origin.geodetic.longitude,
+                            altitude_m: origin.geodetic.altitude,
+                        },
+                    };
+                    let entry = self
+                        .gps
+                        .entry(s.mount)
+                        .or_insert_with(|| (region, Gps::new(SITE_FRAME, reference)));
+                    if entry.0 != region {
+                        *entry = (region, Gps::new(SITE_FRAME, reference));
+                    }
+                    let fix = entry.1.sample(MVec3::from_array(local), sim_time);
+                    let g = fix.geodetic;
+                    ready.push(make(
+                        s,
+                        kind::GPS,
+                        vec![
+                            g.latitude_deg,
+                            g.longitude_deg,
+                            g.altitude_m,
+                            fix.enu.x,
+                            fix.enu.y,
+                            fix.enu.z,
+                            fix.speed,
+                            fix.velocity_enu.x,
+                            fix.velocity_enu.y,
+                            fix.velocity_enu.z,
+                        ],
+                    ));
+                }
+                SensorKind::Climate => {
+                    ready.push(make(s, kind::CLIMATE, environment.air.at(s.world.position).to_vec()));
+                }
+                SensorKind::Position => {
+                    let Some(&joint) = self.joints.get(&s.mount) else { continue };
+                    let r = read_joint(joint)?;
+                    ready.push(make(s, kind::POSITION, vec![r.position, r.velocity]));
+                }
+                SensorKind::Touch => {
+                    let touch_kind = match s.spec.variant {
+                        SensorVariant::Force => TouchKind::Force,
+                        SensorVariant::Force3d => TouchKind::Force3d,
+                        _ => TouchKind::Bumper,
+                    };
+                    let r = TouchSensor::new(s.body, touch_kind).sample(rotation, &environment.contacts);
+                    let f = r.force_sensor;
+                    ready.push(make(
+                        s,
+                        kind::TOUCH,
+                        vec![f64::from(u8::from(r.touching)), r.contacts as f64, r.force, f.x, f.y, f.z],
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok((ready, plan))
+    }
+
+    /// Resolves a completed GPU raycast readback against a [`PendingRayPlan`].
+    pub fn resolve_rays(
+        &self,
+        plan: PendingRayPlan,
+        distances: &[f64],
+        shapes: &[i32],
+        shape_bodies: &[MollaBodyId],
+        sim_time: f64,
+    ) -> Result<Vec<(usize, Measurement)>, String> {
+        let count = plan.origins.len();
+        if distances.len() < count || shapes.len() < count {
+            return Err(format!(
+                "generic rays returned {} distances and {} shapes for {count} rays",
+                distances.len(),
+                shapes.len()
+            ));
+        }
+        if shapes[..count].contains(&INVALID_SCENE_INDEX) {
+            return Err("generic rays: invalid scene pose or unsafe geometry magnitude".into());
+        }
+        let hits: Vec<NearestHit> = distances[..count]
+            .iter()
+            .zip(&shapes[..count])
+            .map(|(&t, &shape)| {
+                if shape < 0 || t <= 0.0 || !t.is_finite() {
+                    NearestHit::MISS
+                } else {
+                    NearestHit {
+                        t,
+                        body: shape_bodies
+                            .get(shape as usize)
+                            .copied()
+                            .unwrap_or(MollaBodyId::NONE),
+                    }
+                }
+            })
+            .collect();
+        let mut out = Vec::with_capacity(plan.entries.len());
+        for entry in plan.entries {
+            match entry {
+                PendingRayEntry::Distance {
+                    mount,
+                    name,
+                    link_index,
+                    sample,
+                    world,
+                    offset,
+                    count,
+                } => {
+                    let Some(sensor) = self.distance.get(&mount) else { continue };
+                    let mut slice = SliceRays {
+                        hits: &hits[offset..offset + count],
+                    };
+                    let r = sensor
+                        .update_with(&mut slice, &[world])
+                        .map_err(|e| format!("distance `{name}`: {e}"))?[0];
+                    out.push((
+                        mount,
+                        measurement(&name, link_index, kind::DISTANCE, sim_time, sample, vec![r.distance, r.value]),
+                    ));
+                }
+                PendingRayEntry::Light {
+                    mount,
+                    name,
+                    link_index,
+                    sample,
+                    world,
+                    mut light,
+                    sky_ray,
+                    shadow_offset,
+                    shadow_count,
+                } => {
+                    if let Some(idx) = sky_ray
+                        && hits[idx].t < SKY_REACH
+                    {
+                        light.sky = 0.0;
+                    }
+                    let mut slice = SliceRays {
+                        hits: &hits[shadow_offset..shadow_offset + shadow_count],
+                    };
+                    let r = self
+                        .light
+                        .update_with(&mut slice, &[world], &light)
+                        .map_err(|e| format!("light `{name}`: {e}"))?[0];
+                    out.push((
+                        mount,
+                        measurement(
+                            &name,
+                            link_index,
+                            kind::LIGHT,
+                            sim_time,
+                            sample,
+                            vec![r.irradiance, r.direct, r.sky, r.visible as f64, r.value],
+                        ),
+                    ));
+                }
+                PendingRayEntry::Radar {
+                    mount,
+                    name,
+                    link_index,
+                    sample,
+                    mut candidates,
+                    offset,
+                } => {
+                    let ray_hits = &hits[offset..offset + candidates.len()];
+                    let mut iter = ray_hits.iter();
+                    candidates.retain(|d| {
+                        let h = iter.next().copied().unwrap_or(NearestHit::MISS);
+                        h.body == d.body || h.t >= d.distance - 1e-3
+                    });
+                    let values = candidates
+                        .iter()
+                        .flat_map(|d| {
+                            [d.distance, d.azimuth, d.elevation, d.radial_speed, d.received_power_dbm]
+                        })
+                        .collect();
+                    out.push((
+                        mount,
+                        measurement(&name, link_index, kind::RADAR, sim_time, sample, values),
+                    ));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Readings of the due generic samples at simulated time `sim_time`,
-    /// casting their rays on `rigid`.
+    /// casting their rays on `rigid` (CPU fallback).
+    #[allow(dead_code)]
     pub fn sample(
         &mut self,
         rigid: &RigidScene,
@@ -641,5 +1081,120 @@ mod tests {
         assert_eq!(m.records().count(), 2);
         assert_eq!(m.name(), "radar");
         assert_eq!(measurement("r", 0, kind::RADAR, 0.0, 0, Vec::new()).count, 0);
+    }
+
+    #[test]
+    fn gpu_ray_plan_and_resolve_match_distance_light_and_radar() {
+        use molla_storage::{Buffer, BufferUsage};
+        let dist_spec = SensorSpec {
+            rays: 5,
+            aperture: 0.4,
+            range_m: 10.0,
+            variant: SensorVariant::Sonar,
+            ..SensorSpec::defaults(SensorKind::Distance, false)
+        };
+        let light_spec = SensorSpec::defaults(SensorKind::Light, false);
+        let radar_spec = SensorSpec {
+            hfov: 90f32.to_radians(),
+            vfov: 40f32.to_radians(),
+            range_m: 30.0,
+            tx_power_dbm: 10.0,
+            frequency_ghz: 77.0,
+            ..SensorSpec::defaults(SensorKind::Radar, false)
+        };
+        let target_a = MollaBodyId::from_index(1);
+        let target_b = MollaBodyId::from_index(2);
+        let mut generic = GenericSensors::build(
+            &[dist_spec, light_spec, radar_spec],
+            HashMap::new(),
+            vec![
+                RadarTarget { body: target_a, cross_section: 4.0 },
+                RadarTarget { body: target_b, cross_section: 1.0 },
+            ],
+        )
+        .unwrap();
+
+        let mut model = Model::empty();
+        model.body_count = 3;
+        model.body_com = Buffer::from_vec(vec![MVec3::ZERO; 3], BufferUsage::Storage);
+        let mut state = State::empty();
+        state.body_q = Buffer::from_vec(
+            vec![
+                MTransform::IDENTITY,
+                MTransform::from_translation(MVec3::new(5.0, 0.0, 0.0)),
+                MTransform::from_translation(MVec3::new(10.0, 0.0, 0.0)),
+            ],
+            BufferUsage::Storage,
+        );
+        state.body_qd = Buffer::from_vec(vec![molla_math::SpatialVector::ZERO; 3], BufferUsage::Storage);
+
+        let env = SensorEnvironment {
+            light: LightEnvironment {
+                sources: vec![LightSource::Directional {
+                    towards: MVec3::X,
+                    irradiance: 400.0,
+                }],
+                sky: 100.0,
+                up: MVec3::Y,
+            },
+            ..Default::default()
+        };
+        let due = [
+            GenericSample {
+                mount: 0,
+                name: "sonar",
+                link_index: 1,
+                spec: dist_spec,
+                body: MollaBodyId::from_index(0),
+                world: MTransform::IDENTITY,
+                sample: 1,
+            },
+            GenericSample {
+                mount: 1,
+                name: "light",
+                link_index: 2,
+                spec: light_spec,
+                body: MollaBodyId::from_index(0),
+                world: MTransform::IDENTITY,
+                sample: 1,
+            },
+            GenericSample {
+                mount: 2,
+                name: "radar",
+                link_index: 3,
+                spec: radar_spec,
+                body: MollaBodyId::from_index(0),
+                world: MTransform::IDENTITY,
+                sample: 1,
+            },
+        ];
+        let (ready, plan) = generic
+            .sample_and_plan_rays(
+                &model,
+                &state,
+                &mut |_| unreachable!("no position sensor"),
+                &env,
+                &due,
+                1.0,
+            )
+            .unwrap();
+        assert!(ready.is_empty());
+        // 5 sonar rays + 1 sky ray + 1 sun ray + 2 radar rays = 9 rays.
+        assert_eq!(plan.origins.len(), 9);
+        // Sonar hits at 6, 3.5, inf, 8, 9 (nearest = 3.5).
+        // Light: roof hit at 4.0 (blocks sky), sun ray misses (direct visible = 1).
+        // Radar: target_a unoccluded (hits target_a at 5.0), target_b occluded by wall at 2.0 (static shape 2).
+        let distances = [6.0, 3.5, -1.0, 8.0, 9.0, 4.0, -1.0, 5.0, 2.0];
+        let shapes = [0, 0, -1, 0, 0, 2, -1, 0, 2];
+        let shape_bodies = [target_a, target_b, MollaBodyId::NONE];
+        let resolved = generic.resolve_rays(plan, &distances, &shapes, &shape_bodies, 1.0).unwrap();
+        assert_eq!(resolved.len(), 3);
+        // Sonar nearest echo = 3.5 m.
+        assert!((resolved[0].1.values[0] - 3.5).abs() < 1e-9);
+        // Light: sky = 0 under roof, direct = 400, visible = 1.
+        assert_eq!((resolved[1].1.values[1], resolved[1].1.values[2], resolved[1].1.values[3]), (400.0, 0.0, 1.0));
+        // Radar: only target_a survives occlusion.
+        assert_eq!(resolved[2].1.count, 1);
+        assert!((resolved[2].1.values[0] - 5.0).abs() < 1e-9);
     }
 }

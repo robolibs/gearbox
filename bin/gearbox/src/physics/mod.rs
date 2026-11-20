@@ -201,6 +201,7 @@ fn attach_projected_stages(world: &mut World) {
             }
             attach::attach_physics_to_entity(world, *entity, &mut pending, &meta);
             attach::attach_joint_softness(world, *entity, stage, path);
+            attach::attach_sensor_metadata(world, *entity, stage, path);
             world.entity_mut(*entity).insert(PhysicsScanned);
         }
         attach::resolve_pending_physics(world, &pending, &by_path);
@@ -345,6 +346,7 @@ fn refresh_swapped_stages(world: &mut World) {
             }
             attach::attach_physics_to_entity(world, *entity, &mut pending, &meta);
             attach::attach_joint_softness(world, *entity, stage, path);
+            attach::attach_sensor_metadata(world, *entity, stage, path);
             world.entity_mut(*entity).insert(PhysicsScanned);
         }
         attach::resolve_pending_physics(world, &pending, &by_path);

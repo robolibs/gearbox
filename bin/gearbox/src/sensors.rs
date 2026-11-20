@@ -1,11 +1,12 @@
-//! Simulated sensors on authored `role = "sensor"` links: Molla GPU IMU and
-//! LiDAR sampled from the Molla physics scene at their own simulated-time
-//! rates and streamed on `/machines/<machine_id>/sensors/<link>`.
+//! Simulated sensors on authored `role = "sensor"` links: Molla GPU IMU,
+//! LiDAR, batched cameras, GPU annotations and async GPU ray sensors sampled
+//! from the shared Molla sensor scene at their own simulated-time rates and
+//! streamed on `/machines/<machine_id>/sensors/<link>`.
 //!
 //! The rig of a machine snapshots the physics scene's geometry once per scene
-//! revision and copies body poses/velocities at each sample; GPU results are
-//! collected without blocking on later frames. The physics lock is held only
-//! for those host copies, never across GPU waits.
+//! revision and copies body poses/velocities at each sample, then encodes all
+//! due GPU sensors into one [`SensorCommandBatch`] submission and collects
+//! results asynchronously on later frames without holding the physics lock.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -29,9 +30,12 @@ use molla_core::BodyId as MollaBodyId;
 use molla_math::{Mat3 as MMat3, Quat as MQuat, Transform as MTransform, Vec3 as MVec3};
 use molla_sensors::readback::{ReadbackConfig, ReadbackRing, ReadbackStamp, ReadbackTicket};
 use molla_sensors::{
-    CameraChannels, ImuMount, ImuSensor, LidarBatch, LidarPattern, LidarScan as MollaLidarScan,
-    ScanMetadata, ScheduledSample, SensorScene, SensorSceneOptions, SensorSchedule,
-    SensorScheduler, TiledCamera, TiledCameraConfig, UnsupportedGeometryPolicy,
+    AnnotationConfig, AnnotationCounts, AnnotationProcessor, CameraBatch, CameraBatchLimits,
+    CameraBatchOutputPool, CameraChannels, CameraSpec, DeviceBoundingBox, EncodedCameraBatch,
+    ImuMount, ImuSensor, LidarBatch, LidarPattern, LidarScan as MollaLidarScan, PhysicalOptics,
+    RadarTarget, Raycaster, RecognizedObject, ScanMetadata, ScheduledSample, SensorCommandBatch,
+    SensorFramePool, SensorFramePoolConfig, SensorScene, SensorSceneOptions,
+    SensorSchedule, SensorScheduler, ShapeLabel, TiledCameraConfig, UnsupportedGeometryPolicy,
 };
 use molla_sim::runtime::{ColliderGeometry, RigidScene, SceneStamp};
 use molla_sim::{Model, State};
@@ -43,7 +47,8 @@ use crate::prim_index::PrimIndex;
 use crate::links::{LinkSpec, LinkTree, SensorKind, SensorSpec};
 use crate::sensor_radio::RadioLink;
 use crate::sensor_generic::{
-    GenericSample, GenericSensors, SensorEnvironment, is_generic, measurement, recognition,
+    GenericSample, GenericSensors, PendingRayPlan, SensorEnvironment, is_generic, measurement,
+    recognition,
 };
 use crate::physics::backend::{BodyId, PhysicsBackend};
 use crate::physics::{PhysicsActive, PhysicsWorld};
@@ -68,6 +73,12 @@ impl Plugin for SensorsPlugin {
 /// The name recognition gives a collider's entity in place of its prim path.
 #[derive(Component, Clone, Debug)]
 pub struct SensorLabel(pub String);
+
+/// Authored radar cross-section (m²) of a rigid body entity. A positive value
+/// overrides the default 1 m² on dynamic bodies and makes fixed or kinematic
+/// bodies detectable by radar; zero excludes the body from radar detection.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct RadarCrossSection(pub f64);
 
 /// Albedo for colliders without a matching visual: terrain and entity-less
 /// ground, then everything else.
@@ -206,6 +217,8 @@ pub struct MachineSensorRigs {
     rigs: HashMap<String, Rig>,
     /// Scene revision at which a machine's rig build last failed.
     failed: HashMap<String, u64>,
+    /// Scene revision at which an individual `(machine_id, link_name)` last failed.
+    failed_links: HashMap<(String, String), u64>,
     /// The sensor scene every rig samples.
     scene: Option<SharedScene>,
     /// The next scene, building off the frame.
@@ -216,6 +229,7 @@ pub struct MachineSensorRigs {
 pub struct SharedScene {
     model: SceneStamp,
     bodies: Vec<u64>,
+    shape_bodies: Arc<[MollaBodyId]>,
     scene: Arc<SensorScene>,
 }
 
@@ -231,7 +245,9 @@ pub struct SceneObjects {
 struct SceneBuild {
     model: SceneStamp,
     bodies: Vec<u64>,
+    shape_bodies: Arc<[MollaBodyId]>,
     objects: HashMap<String, Arc<SceneObjects>>,
+    radar_targets: HashMap<String, Vec<RadarTarget>>,
     task: Task<Result<SensorScene, String>>,
 }
 
@@ -245,8 +261,16 @@ fn shared_scene<'a>(
     colors: &dyn Fn(Entity) -> Option<[f32; 3]>,
 ) -> Result<&'a SharedScene, String> {
     if !cached.as_ref().is_some_and(|shared| &shared.model == model) {
-        let (scene, bodies) = physics.molla(|rigid| sensor_scene(engine, rigid, colors).map(|scene| (scene, body_order(rigid))))?;
-        *cached = Some(SharedScene { model: model.clone(), bodies, scene: Arc::new(scene) });
+        let (scene, bodies, shape_bodies) = physics.molla(|rigid| {
+            sensor_scene(engine, rigid, colors)
+                .map(|scene| (scene, body_order(rigid), shape_bodies(rigid)))
+        })?;
+        *cached = Some(SharedScene {
+            model: model.clone(),
+            bodies,
+            shape_bodies,
+            scene: Arc::new(scene),
+        });
     }
     Ok(cached.as_ref().expect("scene just built"))
 }
@@ -271,12 +295,21 @@ fn swap_built_scene(rigs: &mut MachineSensorRigs, model: &SceneStamp) {
             && rig.model.as_ref() != Some(model)
         {
             rig.scene = scene.clone();
+            rig.shape_bodies = build.shape_bodies.clone();
             rig.objects = objects.clone();
+            if let Some(targets) = build.radar_targets.get(id) {
+                rig.generic.set_radar_targets(targets.clone());
+            }
             rig.model = Some(build.model.clone());
         }
     }
     if rigs.scene.as_ref().is_none_or(|shared| &shared.model != model) {
-        rigs.scene = Some(SharedScene { model: build.model, bodies: build.bodies, scene });
+        rigs.scene = Some(SharedScene {
+            model: build.model,
+            bodies: build.bodies,
+            shape_bodies: build.shape_bodies,
+            scene,
+        });
     }
 }
 
@@ -341,6 +374,39 @@ pub struct RigStats {
     pub readback_bytes: u64,
     pub frames: u64,
     pub dropped: u64,
+    pub gpu_batches: u64,
+    pub gpu_dispatches: u64,
+}
+
+const POOL_SLOTS: usize = 4;
+const MIN_GENERIC_RAY_CAPACITY: u32 = 64;
+const MAX_ANNOTATION_LABELS: u32 = 65_536;
+const MAX_ANNOTATION_BUFFER_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Traced cameras sharing one sample rate, batched into one [`CameraBatch`]
+/// over the currently subscribed subset so unsubscribed cameras cost nothing
+/// and homogeneous cameras trace together.
+struct CameraBucket {
+    rate_bits: u32,
+    mounts: Vec<usize>,
+    active: Vec<usize>,
+    batch: Option<(CameraBatch, CameraBatchOutputPool)>,
+}
+
+/// GPU raycaster and output pool for async generic ray sensors (distance,
+/// light, radar).
+struct GenericRayGpu {
+    capacity: u32,
+    raycaster: Raycaster,
+    pool: SensorFramePool,
+}
+
+/// GPU annotation processor chained directly off [`CameraBatch`] outputs for
+/// camera recognition links.
+struct AnnotationGpu {
+    processor: AnnotationProcessor,
+    pool: SensorFramePool,
+    max_labels: u32,
 }
 
 struct Mount {
@@ -380,16 +446,23 @@ pub struct Rig {
     model: Option<SceneStamp>,
     signature: Vec<ResolvedMount>,
     scene: Arc<SensorScene>,
+    shape_bodies: Arc<[MollaBodyId]>,
     imu_model: Model,
     state: State,
     scheduler: SensorScheduler,
     mounts: Vec<Mount>,
-    imu: Option<ImuSensor>,
+    imu: Option<(ImuSensor, SensorFramePool)>,
     imu_mounts: Vec<usize>,
     last_imu_time: Option<f64>,
-    lidar: Option<LidarBatch>,
-    cameras: Vec<(usize, TiledCamera)>,
+    lidar: Option<(LidarBatch, SensorFramePool)>,
+    camera_buckets: Vec<CameraBucket>,
+    max_camera_bytes: u64,
+    annotation: Option<AnnotationGpu>,
+    annotation_synced: Option<Arc<SceneObjects>>,
+    generic_rays: Option<GenericRayGpu>,
     ring: ReadbackRing,
+    ring_bytes_per_slot: u64,
+    ring_slots: usize,
     pending: Vec<Pending>,
     render_requests: Vec<RenderRequest>,
     generic: GenericSensors,
@@ -482,10 +555,28 @@ struct Pending {
 }
 
 enum PendingKind {
-    Imu { due: Vec<(usize, MQuat)> },
-    Lidar { scans: Vec<PendingScan> },
-    /// `objects` names the shapes of the scene the frame was traced in.
-    Camera { mount: usize, sample: u64, objects: Arc<SceneObjects> },
+    Imu {
+        due: Vec<(usize, MQuat)>,
+    },
+    Lidar {
+        scans: Vec<PendingScan>,
+    },
+    /// Generic ray sensors (distance, light, radar) evaluated asynchronously on GPU.
+    GenericRays {
+        plan: PendingRayPlan,
+        shape_bodies: Arc<[MollaBodyId]>,
+    },
+    /// Camera readback carrying pixel channels and optional GPU annotation boxes/counts.
+    Camera {
+        mount: usize,
+        sample: u64,
+        objects: Arc<SceneObjects>,
+        has_color: bool,
+        has_depth: bool,
+        has_shape: bool,
+        has_annotation: bool,
+        has_boxes: bool,
+    },
 }
 
 struct PendingScan {
@@ -532,9 +623,10 @@ pub(crate) fn run_machine_sensors(
     queue: Option<Res<RenderQueue>>,
     adapter: Option<Res<RenderAdapterInfo>>,
     prims: Query<(Entity, &UsdPrimRef)>,
-    (parents, sensor_labels, air, prim_index): (
+    (parents, sensor_labels, radar_rcs, air, prim_index): (
         Query<&ChildOf>,
         Query<&SensorLabel>,
+        Query<&RadarCrossSection>,
         Option<Res<crate::sensor_generic::AirField>>,
         Res<PrimIndex>,
     ),
@@ -549,6 +641,7 @@ pub(crate) fn run_machine_sensors(
     let live: HashSet<&str> = inventory.machines.iter().map(|m| m.id.as_str()).collect();
     rigs.rigs.retain(|id, _| live.contains(id.as_str()));
     rigs.failed.retain(|id, _| live.contains(id.as_str()));
+    rigs.failed_links.retain(|(id, _), _| live.contains(id.as_str()));
     if rigs.rigs.is_empty() {
         rigs.scene = None;
         rigs.building = None;
@@ -566,6 +659,7 @@ pub(crate) fn run_machine_sensors(
             &inventory,
         )
     };
+    let rcs = |entity: Entity| radar_rcs.get(entity).ok().map(|r| r.0);
     let stamp_ms = (time.elapsed_secs_f64() * 1000.0) as u32;
     let sim_time = physics.simulated_seconds;
     let touch = inventory.machines.iter().any(|m| {
@@ -622,21 +716,28 @@ pub(crate) fn run_machine_sensors(
         let engine = rigs.engine.as_ref().expect("sensor engine");
 
         let revision = physics.molla(|scene| scene.revision());
-        let resolved = match resolve_mounts(
+        let resolution = resolve_mounts(
             &physics,
             &machine.links,
             scene_root,
             &prim_index,
             &transforms,
-        ) {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                if rigs.failed.insert(machine.id.clone(), revision) != Some(revision) {
-                    error!("gearbox-sensors: `{}`: {error}", machine.id);
-                }
-                continue;
+        );
+        for (link_name, error) in &resolution.failed {
+            let key = (machine.id.clone(), link_name.clone());
+            if rigs.failed_links.insert(key, revision) != Some(revision) {
+                error!("gearbox-sensors: `{}`: {error}", machine.id);
             }
-        };
+        }
+        for mount in &resolution.mounts {
+            rigs.failed_links
+                .remove(&(machine.id.clone(), mount.name.clone()));
+        }
+        let resolved = resolution.mounts;
+        if resolved.is_empty() {
+            rigs.rigs.remove(&machine.id);
+            continue;
+        }
         // A rig over the same bodies samples its scene until a newer one is
         // built off the frame.
         let stale = rigs.rigs.get(&machine.id).is_none_or(|rig| {
@@ -657,7 +758,19 @@ pub(crate) fn run_machine_sensors(
                 .collect();
             let started = std::time::Instant::now();
             let built = shared_scene(engine, &mut rigs.scene, &**physics, &model, &visuals.memo())
-                .and_then(|shared| Rig::build(engine, &**physics, resolved, revision, sim_time, shared, &label, &own));
+                .and_then(|shared| {
+                    Rig::build(
+                        engine,
+                        &**physics,
+                        resolved,
+                        revision,
+                        sim_time,
+                        shared,
+                        &label,
+                        &rcs,
+                        &own,
+                    )
+                });
             match built {
                 Ok(mut rig) => {
                     rig.model = Some(model.clone());
@@ -722,9 +835,11 @@ pub(crate) fn run_machine_sensors(
             let s = rig.stats;
             if s.samples > 0 {
                 info!(
-                    "gearbox-sensors: `{}`: {} samples, {:.3} ms sample + {:.3} ms collect per sample, {:.1} KB up, {:.1} KB down per sample, {} frames, {} dropped in the last {:.0} s",
+                    "gearbox-sensors: `{}`: {} samples ({} gpu batches, {} dispatches), {:.3} ms sample + {:.3} ms collect per sample, {:.1} KB up, {:.1} KB down per sample, {} frames, {} dropped in the last {:.0} s",
                     machine.id,
                     s.samples,
+                    s.gpu_batches,
+                    s.gpu_dispatches,
                     1000.0 * s.sample_seconds / s.samples as f64,
                     1000.0 * s.collect_seconds / s.samples as f64,
                     s.upload_bytes as f64 / 1024.0 / s.samples as f64,
@@ -741,20 +856,39 @@ pub(crate) fn run_machine_sensors(
     if rigs.building.is_none()
         && let Some(engine) = rigs.engine.as_ref()
     {
-        let behind: Vec<(String, Option<&HashSet<u64>>)> = rigs
+        let behind: Vec<(String, Option<&HashSet<u64>>, &HashSet<u64>)> = rigs
             .rigs
             .iter()
             .filter(|(_, rig)| rig.model.as_ref() != Some(&model) && rig.bodies == bodies)
-            .map(|(id, rig)| (id.clone(), rig.recognition.then_some(&rig.own)))
+            .map(|(id, rig)| (id.clone(), rig.recognition.then_some(&rig.own), &rig.own))
             .collect();
         if !behind.is_empty() {
             let started = physics.molla(|rigid| {
                 let objects = behind
                     .iter()
-                    .map(|(id, own)| (id.clone(), Arc::new(own.map_or_else(SceneObjects::default, |own| shape_objects(rigid, own, &label)))))
+                    .map(|(id, rec_own, _)| {
+                        (
+                            id.clone(),
+                            Arc::new(rec_own.map_or_else(SceneObjects::default, |own| {
+                                shape_objects(rigid, own, &label)
+                            })),
+                        )
+                    })
                     .collect();
+                let targets = behind
+                    .iter()
+                    .map(|(id, _, own)| (id.clone(), radar_targets(rigid, own, &rcs)))
+                    .collect();
+                let shape_bodies = shape_bodies(rigid);
                 build_scene_off_frame(engine, rigid, shape_colors(rigid, &visuals.memo()))
-                    .map(|task| SceneBuild { model: model.clone(), bodies: bodies.clone(), objects, task })
+                    .map(|task| SceneBuild {
+                        model: model.clone(),
+                        bodies: bodies.clone(),
+                        shape_bodies,
+                        objects,
+                        radar_targets: targets,
+                        task,
+                    })
             });
             match started {
                 Ok(build) => rigs.building = Some(build),
@@ -838,43 +972,60 @@ fn camera_in_link() -> MQuat {
     .normalize()
 }
 
+/// Per-machine mount resolution result: healthy mounts proceed even when a
+/// sibling sensor link is misconfigured.
+pub struct MountResolution {
+    pub mounts: Vec<ResolvedMount>,
+    /// Structural errors per skipped link: `(link_name, reason)`.
+    pub failed: Vec<(String, String)>,
+}
+
 /// Every authored sensor link of a machine with its body and mount pose.
+/// Links that fail validation are returned in `failed` rather than aborting
+/// the machine's healthy links; links whose entities/bodies are still spawning
+/// are skipped until the next frame.
 fn resolve_mounts(
     physics: &PhysicsWorld,
     links: &LinkTree,
     scene_root: Entity,
     prim_index: &PrimIndex,
     transforms: &Query<&GlobalTransform>,
-) -> Result<Vec<ResolvedMount>, String> {
+) -> MountResolution {
     let mut mounts = Vec::new();
+    let mut failed = Vec::new();
     for (index, link) in links.links.iter().enumerate() {
         let Some(spec) = link.sensor else {
             continue;
         };
-        let body_prim = rigid_body_prim(links, link)
-            .ok_or_else(|| format!("sensor link `{}` has no rigid-body ancestor", link.name))?;
-        let body_entity = prim_index
-            .find(scene_root, body_prim)
-            .ok_or_else(|| format!("sensor link `{}`: no entity for `{body_prim}`", link.name))?;
-        let sensor_entity = prim_index
-            .find(scene_root, &link.prim_path)
-            .ok_or_else(|| format!("sensor link `{}` has no entity", link.name))?;
-        let body = *physics
-            .entity_to_body
-            .get(&body_entity)
-            .ok_or_else(|| format!("sensor link `{}`: `{body_prim}` has no body", link.name))?;
+        let Some(body_prim) = rigid_body_prim(links, link) else {
+            failed.push((
+                link.name.clone(),
+                format!("sensor link `{}` has no rigid-body ancestor", link.name),
+            ));
+            continue;
+        };
+        let Some(body_entity) = prim_index.find(scene_root, body_prim) else {
+            continue;
+        };
+        let Some(sensor_entity) = prim_index.find(scene_root, &link.prim_path) else {
+            continue;
+        };
+        let Some(&body) = physics.entity_to_body.get(&body_entity) else {
+            continue;
+        };
         let (Ok(body_gt), Ok(sensor_gt)) =
             (transforms.get(body_entity), transforms.get(sensor_entity))
         else {
-            return Err(format!("sensor link `{}` has no transforms yet", link.name));
+            continue;
         };
         let local = body_gt.affine().inverse() * sensor_gt.affine();
         let (_, rotation, translation) = local.to_scale_rotation_translation();
         if !rotation.is_finite() || !translation.is_finite() {
-            return Err(format!(
-                "sensor link `{}` has a non-finite mount",
-                link.name
+            failed.push((
+                link.name.clone(),
+                format!("sensor link `{}` has a non-finite mount", link.name),
             ));
+            continue;
         }
         let joint = (spec.kind == SensorKind::Position)
             .then(|| {
@@ -887,7 +1038,11 @@ fn resolve_mounts(
             })
             .flatten();
         if spec.kind == SensorKind::Position && joint.is_none() {
-            return Err(format!("position sensor `{}` has no joint above it", link.name));
+            failed.push((
+                link.name.clone(),
+                format!("position sensor `{}` has no joint above it", link.name),
+            ));
+            continue;
         }
         mounts.push(ResolvedMount {
             link: index,
@@ -912,7 +1067,7 @@ fn resolve_mounts(
             ),
         });
     }
-    Ok(mounts)
+    MountResolution { mounts, failed }
 }
 
 /// Whether a mount set differs beyond the f32 jitter of resolved poses.
@@ -941,11 +1096,256 @@ fn rigid_body_prim<'a>(links: &'a LinkTree, link: &'a LinkSpec) -> Option<&'a st
     None
 }
 
+fn camera_config(spec: &SensorSpec, traced: &[CameraChannels]) -> TiledCameraConfig {
+    TiledCameraConfig {
+        width: spec.width,
+        height: spec.height,
+        fov_y_radians: spec.vfov,
+        channels: CameraChannels(traced.iter().fold(0, |all, c| all | c.0)),
+        max_distance: spec.range_m,
+        optics: PhysicalOptics {
+            lens_diameter_m: spec.lens_diameter_m,
+            focal_distance_m: spec.focal_distance_m,
+            aperture_samples: spec.aperture_samples.max(1),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn shape_labels_for(objects: &SceneObjects) -> Vec<ShapeLabel> {
+    objects
+        .shapes
+        .iter()
+        .enumerate()
+        .filter_map(|(shape_id, obj)| {
+            obj.map(|class_id| ShapeLabel {
+                shape_id: shape_id as u32,
+                class_id,
+            })
+        })
+        .collect()
+}
+
+fn build_annotation_gpu(
+    engine: &Engine,
+    mounts: &[Mount],
+    objects: &Arc<SceneObjects>,
+) -> Option<AnnotationGpu> {
+    let rec_mounts: Vec<&SensorSpec> = mounts
+        .iter()
+        .map(|m| &m.resolved.spec)
+        .filter(|s| s.kind == SensorKind::Camera && s.recognition)
+        .collect();
+    if rec_mounts.is_empty() {
+        return None;
+    }
+    let max_pixels: u64 = rec_mounts
+        .iter()
+        .map(|s| u64::from(s.width) * u64::from(s.height))
+        .sum();
+    let max_images = rec_mounts.len() as u32;
+    let labels = shape_labels_for(objects);
+    let max_labels = (labels.len() as u32).max(16).next_power_of_two();
+    if max_pixels == 0 || max_pixels > u32::MAX as u64 || max_labels > MAX_ANNOTATION_LABELS {
+        return None;
+    }
+    let config = AnnotationConfig {
+        max_pixels: max_pixels as u32,
+        max_images,
+        max_labels,
+        max_buffer_bytes: MAX_ANNOTATION_BUFFER_BYTES,
+    };
+    let mut processor = match AnnotationProcessor::new(engine, config) {
+        Ok(p) => p,
+        Err(error) => {
+            warn!("gearbox-sensors: GPU annotation unavailable, falling back to CPU: {error}");
+            return None;
+        }
+    };
+    if let Err(error) = processor.set_labels(&labels) {
+        warn!("gearbox-sensors: GPU annotation labels failed: {error}");
+        return None;
+    }
+    let slot_bytes = max_pixels * 8
+        + u64::from(max_images) * u64::from(max_labels) * 32
+        + u64::from(max_images) * 16;
+    let pool = match processor.output_pool(
+        engine,
+        SensorFramePoolConfig {
+            slots: POOL_SLOTS,
+            max_total_bytes: (slot_bytes.max(64)) * POOL_SLOTS as u64 * 2,
+        },
+    ) {
+        Ok(pool) => pool,
+        Err(error) => {
+            warn!("gearbox-sensors: GPU annotation pool failed: {error}");
+            return None;
+        }
+    };
+    Some(AnnotationGpu {
+        processor,
+        pool,
+        max_labels,
+    })
+}
+
+fn build_generic_ray_gpu(engine: &Engine, capacity: u32) -> Result<GenericRayGpu, String> {
+    let capacity = capacity.max(MIN_GENERIC_RAY_CAPACITY);
+    let raycaster =
+        Raycaster::new(engine, capacity).map_err(|e| format!("generic raycaster: {e}"))?;
+    let slot_bytes = u64::from(capacity) * 96;
+    let pool = raycaster
+        .output_pool(
+            engine,
+            SensorFramePoolConfig {
+                slots: POOL_SLOTS,
+                max_total_bytes: slot_bytes * POOL_SLOTS as u64 * 2,
+            },
+        )
+        .map_err(|e| format!("generic raycaster pool: {e}"))?;
+    Ok(GenericRayGpu {
+        capacity,
+        raycaster,
+        pool,
+    })
+}
+
+fn build_camera_batch(
+    engine: &Engine,
+    mounts: &[Mount],
+    active: &[usize],
+) -> Result<(CameraBatch, CameraBatchOutputPool), String> {
+    let specs: Vec<CameraSpec> = active
+        .iter()
+        .map(|&idx| {
+            let spec = mounts[idx].resolved.spec;
+            let traced = camera_channels(&spec);
+            CameraSpec {
+                sensor_id: idx as u64,
+                config: camera_config(&spec, &traced),
+                pose: MTransform::IDENTITY,
+            }
+        })
+        .collect();
+    let total_pixels: u64 = specs
+        .iter()
+        .map(|s| u64::from(s.config.width) * u64::from(s.config.height))
+        .sum();
+    let limits = CameraBatchLimits {
+        max_cameras: specs.len().max(64),
+        max_groups: specs.len().clamp(16, 64),
+        max_total_pixels: total_pixels.max(4_000_000),
+    };
+    let batch =
+        CameraBatch::new(engine, &specs, limits).map_err(|e| format!("camera batch: {e}"))?;
+    let max_total_bytes = total_pixels
+        .saturating_mul(32)
+        .saturating_mul(POOL_SLOTS as u64)
+        .saturating_mul(2)
+        .max(1024);
+    let pool = batch
+        .output_pool(
+            engine,
+            SensorFramePoolConfig {
+                slots: POOL_SLOTS,
+                max_total_bytes,
+            },
+        )
+        .map_err(|e| format!("camera batch pool: {e}"))?;
+    Ok((batch, pool))
+}
+
+/// Group cropped rows `start_row..start_row+rows` by object id using the same
+/// geometry as [`molla_sensors::recognize`].
+#[allow(clippy::too_many_arguments)]
+fn recognize_rows(
+    width: u32,
+    height: u32,
+    fov_y: f64,
+    start_row: u32,
+    rows: u32,
+    depth: &[f64],
+    shape: &[u32],
+    object_of: &dyn Fn(u32) -> Option<u64>,
+    min_pixels: u32,
+) -> Vec<RecognizedObject> {
+    struct Acc {
+        pixels: u32,
+        bbox: [u32; 4],
+        sum: MVec3,
+        lo: MVec3,
+        hi: MVec3,
+    }
+    let mut objects: std::collections::BTreeMap<u64, Acc> = Default::default();
+    let total = (width as usize * rows as usize)
+        .min(depth.len())
+        .min(shape.len());
+    for index in 0..total {
+        let (s, d) = (shape[index], depth[index]);
+        if s == molla_sensors::recognition::NO_SHAPE || !d.is_finite() {
+            continue;
+        }
+        let Some(id) = object_of(s) else { continue };
+        let px = index as u32 % width;
+        let py = start_row + index as u32 / width;
+        let point = molla_sensors::recognition::pixel_ray(width, height, fov_y, px, py) * d;
+        let acc = objects.entry(id).or_insert(Acc {
+            pixels: 0,
+            bbox: [px, py, px, py],
+            sum: MVec3::ZERO,
+            lo: point,
+            hi: point,
+        });
+        acc.pixels += 1;
+        acc.bbox = [
+            acc.bbox[0].min(px),
+            acc.bbox[1].min(py),
+            acc.bbox[2].max(px),
+            acc.bbox[3].max(py),
+        ];
+        acc.sum += point;
+        acc.lo = acc.lo.min(point);
+        acc.hi = acc.hi.max(point);
+    }
+    objects
+        .into_iter()
+        .filter(|(_, acc)| acc.pixels >= min_pixels.max(1))
+        .map(|(id, acc)| RecognizedObject {
+            id,
+            pixels: acc.pixels,
+            bbox: acc.bbox,
+            position: acc.sum / acc.pixels as f64,
+            size: acc.hi - acc.lo,
+        })
+        .collect()
+}
+
+fn bounding_row_span(boxes: &[DeviceBoundingBox], height: u32) -> Option<(u32, u32)> {
+    let mut min_y = u32::MAX;
+    let mut max_y = 0u32;
+    let mut any = false;
+    for b in boxes {
+        if b.pixel_count == 0 {
+            continue;
+        }
+        min_y = min_y.min(b.bounds[1]);
+        max_y = max_y.max(b.bounds[3]);
+        any = true;
+    }
+    if !any || height == 0 {
+        return None;
+    }
+    let min_y = min_y.min(height - 1);
+    let max_y = max_y.min(height - 1);
+    Some((min_y, max_y))
+}
+
 impl Rig {
     /// Snapshots the Molla scene and creates the GPU sensors of `mounts`;
-    /// `colors` gives a collider entity's display colour for the cameras,
-    /// `labels` its object name for recognition, and `own_bodies` the
-    /// machine's bodies, which its radars and recognition ignore.
+    /// `labels` gives a collider entity's object name for recognition, `rcs`
+    /// gives authored radar cross-sections, and `own_bodies` the machine's
+    /// bodies, which its radars and recognition ignore.
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         engine: &Engine,
@@ -955,33 +1355,47 @@ impl Rig {
         sim_time: f64,
         shared: &SharedScene,
         labels: &dyn Fn(Entity) -> Option<String>,
+        rcs: &dyn Fn(Entity) -> Option<f64>,
         own_bodies: &[BodyId],
     ) -> Result<Self, String> {
         let scene = shared.scene.clone();
+        let shape_bodies = shared.shape_bodies.clone();
         let device = engine.device().ok_or("sensor engine has no device")?;
         let queue = engine.queue().ok_or("sensor engine has no queue")?;
-        let handles = mounts
-            .iter()
-            .map(|m| {
-                physics
-                    .molla_body_handle(m.body)
-                    .ok_or_else(|| format!("sensor link `{}`: unknown body", m.name))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let (imu_model, mut state, bodies) = physics.molla(|scene| snapshot_bodies(engine, scene, &handles))?;
+        let mut valid_mounts = Vec::with_capacity(mounts.len());
+        let mut handles = Vec::with_capacity(mounts.len());
+        for m in mounts {
+            match physics.molla_body_handle(m.body) {
+                Some(handle) => {
+                    handles.push(handle);
+                    valid_mounts.push(m);
+                }
+                None => warn!(
+                    "gearbox-sensors: skipping sensor link `{}`: unknown physics body",
+                    m.name
+                ),
+            }
+        }
+        if valid_mounts.is_empty() {
+            return Err("no sensor link has a valid physics body".into());
+        }
+        let (imu_model, mut state, bodies) =
+            physics.molla(|scene| snapshot_bodies(engine, scene, &handles))?;
         let own: HashSet<u64> = own_bodies
             .iter()
             .filter_map(|&b| physics.molla_body_handle(b))
             .map(|h| h.to_bits())
             .collect();
         let (mut joints, mut targets) = (HashMap::new(), Vec::new());
-        let recognition = mounts.iter().any(|m| m.spec.kind == SensorKind::Camera && m.spec.recognition);
+        let recognition = valid_mounts
+            .iter()
+            .any(|m| m.spec.kind == SensorKind::Camera && m.spec.recognition);
         let mut objects = SceneObjects::default();
         physics.with_molla_scene(&mut |rigid| {
             if recognition {
                 objects = shape_objects(rigid, &own, labels);
             }
-            for (i, mount) in mounts.iter().enumerate() {
+            for (i, mount) in valid_mounts.iter().enumerate() {
                 let Some(joint) = mount.joint else { continue };
                 if let Some(index) = rigid
                     .joints()
@@ -991,22 +1405,16 @@ impl Rig {
                     joints.insert(i, index.index());
                 }
             }
-            targets = rigid
-                .bodies()
-                .filter(|(h, desc)| {
-                    desc.kind == molla_sim::runtime::BodyKind::Dynamic && !own.contains(&h.to_bits())
-                })
-                .filter_map(|(h, _)| rigid.body_index(h))
-                .collect();
+            targets = radar_targets(rigid, &own, rcs);
         });
-        let specs: Vec<SensorSpec> = mounts.iter().map(|m| m.spec).collect();
+        let specs: Vec<SensorSpec> = valid_mounts.iter().map(|m| m.spec).collect();
         let generic = GenericSensors::build(&specs, joints, targets)?;
         state
             .upload_to_device(device, queue)
             .map_err(|e| format!("sensor state upload: {e}"))?;
 
-        let signature = mounts.clone();
-        let mounts: Vec<Mount> = mounts
+        let signature = valid_mounts.clone();
+        let mounts: Vec<Mount> = valid_mounts
             .into_iter()
             .zip(bodies)
             .map(|(resolved, body)| Mount {
@@ -1047,7 +1455,19 @@ impl Rig {
                     local_pose: mounts[i].resolved.local,
                 })
                 .collect();
-            Some(ImuSensor::new(engine, &imu_model, &descs).map_err(|e| format!("imu: {e}"))?)
+            let sensor = ImuSensor::new(engine, &imu_model, &descs)
+                .map_err(|e| format!("imu: {e}"))?;
+            let max_total_bytes = (imu_mounts.len() as u64 * 32 * POOL_SLOTS as u64 * 2).max(256);
+            let pool = sensor
+                .output_pool(
+                    engine,
+                    SensorFramePoolConfig {
+                        slots: POOL_SLOTS,
+                        max_total_bytes,
+                    },
+                )
+                .map_err(|e| format!("imu pool: {e}"))?;
+            Some((sensor, pool))
         };
         let lidars: Vec<&Mount> = mounts
             .iter()
@@ -1060,47 +1480,90 @@ impl Rig {
         let lidar = if lidars.is_empty() {
             None
         } else {
-            Some(
-                LidarBatch::new(engine, lidars.len(), lidar_rays)
-                    .map_err(|e| format!("lidar: {e}"))?,
-            )
+            let batch = LidarBatch::new(engine, lidars.len(), lidar_rays)
+                .map_err(|e| format!("lidar: {e}"))?;
+            let max_total_bytes = (u64::from(lidar_rays.max(1)) * 128 * POOL_SLOTS as u64 * 2).max(1024);
+            let pool = batch
+                .output_pool(
+                    engine,
+                    SensorFramePoolConfig {
+                        slots: POOL_SLOTS,
+                        max_total_bytes,
+                    },
+                )
+                .map_err(|e| format!("lidar pool: {e}"))?;
+            Some((batch, pool))
         };
-        let mut cameras = Vec::new();
+        let mut camera_buckets: Vec<CameraBucket> = Vec::new();
         let mut camera_bytes = 0u64;
+        let mut camera_count = 0usize;
         for (i, mount) in mounts.iter().enumerate() {
             let spec = mount.resolved.spec;
             let traced = camera_channels(&spec);
             if spec.kind != SensorKind::Camera || traced.is_empty() {
                 continue;
             }
-            let config = TiledCameraConfig {
-                width: spec.width,
-                height: spec.height,
-                fov_y_radians: spec.vfov,
-                channels: CameraChannels(traced.iter().fold(0, |all, c| all | c.0)),
-                max_distance: spec.range_m,
-                ..Default::default()
-            };
-            let camera = TiledCamera::new(engine, config, 1)
-                .map_err(|e| format!("camera `{}`: {e}", mount.name))?;
+            camera_count += 1;
             let texel: u64 = traced
                 .iter()
-                .map(|&c| if c == CameraChannels::DEPTH { 8 } else { 4 })
+                .map(|&c| if c == CameraChannels::NORMAL { 16 } else { 4 })
                 .sum();
             camera_bytes = camera_bytes.max(u64::from(spec.width) * u64::from(spec.height) * texel);
-            cameras.push((i, camera));
+            let rate_bits = spec.rate_hz.to_bits();
+            if let Some(bucket) = camera_buckets.iter_mut().find(|b| b.rate_bits == rate_bits) {
+                bucket.mounts.push(i);
+            } else {
+                camera_buckets.push(CameraBucket {
+                    rate_bits,
+                    mounts: vec![i],
+                    active: Vec::new(),
+                    batch: None,
+                });
+            }
         }
-        let bytes_per_slot = (imu_mounts.len() as u64 * 32)
+        let objects = Arc::new(objects);
+        let annotation = build_annotation_gpu(engine, &mounts, &objects);
+        let annotation_synced = recognition.then(|| objects.clone());
+        let annotation_bytes = annotation.as_ref().map_or(0u64, |a| {
+            u64::from(a.max_labels) * 32 + 16
+        });
+
+        let needs_generic_rays = mounts.iter().any(|m| {
+            matches!(
+                m.resolved.spec.kind,
+                SensorKind::Distance | SensorKind::Light | SensorKind::Radar
+            )
+        });
+        let generic_ray_est: u32 = mounts
+            .iter()
+            .map(|m| match m.resolved.spec.kind {
+                SensorKind::Distance => m.resolved.spec.rays.max(1),
+                SensorKind::Light => 8,
+                SensorKind::Radar => generic.radar_target_count().max(16) as u32,
+                _ => 0,
+            })
+            .sum();
+        let generic_rays = if needs_generic_rays {
+            Some(build_generic_ray_gpu(engine, generic_ray_est)?)
+        } else {
+            None
+        };
+        let generic_ray_bytes = generic_rays
+            .as_ref()
+            .map_or(0u64, |g| u64::from(g.capacity) * 12);
+
+        let ring_bytes_per_slot = (imu_mounts.len() as u64 * 32)
             .max(lidar_rays as u64 * 24)
-            .max(camera_bytes)
-            .max(8);
-        let slots = 2 * (1 + lidars.len() + cameras.len()) + 2;
+            .max(camera_bytes + annotation_bytes)
+            .max(generic_ray_bytes)
+            .max(64);
+        let ring_slots = (2 * (1 + lidars.len() + camera_count * 2 + 2) + 4).clamp(4, 64);
         let ring = ReadbackRing::new(
             engine,
             ReadbackConfig {
-                slots,
-                bytes_per_slot,
-                max_total_bytes: bytes_per_slot * slots as u64,
+                slots: ring_slots,
+                bytes_per_slot: ring_bytes_per_slot,
+                max_total_bytes: ring_bytes_per_slot * ring_slots as u64,
             },
         )
         .map_err(|e| format!("sensor readback: {e}"))?;
@@ -1110,6 +1573,7 @@ impl Rig {
             model: None,
             signature,
             scene,
+            shape_bodies,
             imu_model,
             state,
             scheduler,
@@ -1118,19 +1582,45 @@ impl Rig {
             imu_mounts,
             last_imu_time: None,
             lidar,
-            cameras,
+            camera_buckets,
+            max_camera_bytes: camera_bytes,
+            annotation,
+            annotation_synced,
+            generic_rays,
             ring,
+            ring_bytes_per_slot,
+            ring_slots,
             pending: Vec::new(),
             render_requests: Vec::new(),
             generic,
             ready: Vec::new(),
-            objects: Arc::new(objects),
+            objects,
             bodies: shared.bodies.clone(),
             own,
             recognition,
             stats: RigStats::default(),
             last_report: 0.0,
         })
+    }
+
+    fn ensure_ring_slot_bytes(&mut self, engine: &Engine, needed: u64) -> Result<(), String> {
+        if needed <= self.ring_bytes_per_slot {
+            return Ok(());
+        }
+        let next = needed.next_power_of_two().max(64);
+        let ring = ReadbackRing::new(
+            engine,
+            ReadbackConfig {
+                slots: self.ring_slots,
+                bytes_per_slot: next,
+                max_total_bytes: next * self.ring_slots as u64,
+            },
+        )
+        .map_err(|e| format!("sensor readback resize: {e}"))?;
+        self.pending.clear();
+        self.ring = ring;
+        self.ring_bytes_per_slot = next;
+        Ok(())
     }
 
     /// Bevy colour renders requested by the samples issued since the last call.
@@ -1170,9 +1660,9 @@ impl Rig {
             .filter(|r| r.spec.kind == SensorKind::Camera && r.spec.color && r.spec.render.is_bevy())
     }
 
-    /// Issues every sample due at `sim_time` without waiting on the GPU
-    /// (generic ray sensors cast synchronously). A link samples only while
-    /// `wanted` says someone asks for its readings; radio links always do.
+    /// Issues every sample due at `sim_time` in one [`SensorCommandBatch`]
+    /// without waiting on the GPU. A link samples only while `wanted` says
+    /// someone asks for its readings; radio links always do.
     pub fn sample(
         &mut self,
         engine: &Engine,
@@ -1181,6 +1671,9 @@ impl Rig {
         environment: &SensorEnvironment,
         wanted: &mut dyn FnMut(&str) -> bool,
     ) -> Result<(), String> {
+        if let Some(device) = engine.device() {
+            let _ = device.poll(wgpu::PollType::Poll);
+        }
         let mut due: Vec<ScheduledSample> = self
             .scheduler
             .advance(Duration::from_secs_f64(sim_time))
@@ -1210,196 +1703,36 @@ impl Rig {
             .to_vec();
         let world_pose = |mount: &Mount| body_q[mount.body.index()].compose(&mount.resolved.local);
 
-        let imu_due: Vec<(usize, MQuat)> = due
-            .iter()
-            .map(|s| s.sensor_id as usize)
-            .filter(|&i| self.mounts[i].resolved.spec.kind.uses_imu())
-            .map(|i| (i, world_pose(&self.mounts[i]).rotation))
-            .collect();
-        if let (Some(imu), false) = (self.imu.as_mut(), imu_due.is_empty()) {
-            let fastest = self
-                .imu_mounts
-                .iter()
-                .map(|&i| self.mounts[i].resolved.spec.rate_hz)
-                .fold(f32::MIN, f32::max);
-            let slowest_due = imu_due
-                .iter()
-                .map(|&(i, _)| self.mounts[i].resolved.spec.rate_hz)
-                .fold(f32::MAX, f32::min);
-            // An IMU that skipped samples re-primes instead of differencing across the gap.
-            if self.last_imu_time.is_some_and(|t| sim_time - t > 2.0 / slowest_due as f64) {
-                imu.reset();
-                self.last_imu_time = None;
-            }
-            let dt = self
-                .last_imu_time
-                .map(|t| sim_time - t)
-                .filter(|dt| *dt > 0.0)
-                .unwrap_or(1.0 / fastest as f64);
-            self.last_imu_time = Some(sim_time);
-            let readings = imu
-                .dispatch(engine, &self.imu_model, &self.state, dt)
-                .map_err(|e| format!("imu dispatch: {e}"))?;
-            if let Some(readings) = readings {
-                let n = self.imu_mounts.len();
-                let sources = [
-                    readings.accelerometer.readback_source(0..n),
-                    readings.gyroscope.readback_source(0..n),
-                ]
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| e.to_string())?;
-                let stamp = ReadbackStamp {
-                    sensor_id: u64::MAX,
-                    sample_id: due[0].sample_id,
-                    scene_revision: self.revision,
-                    simulation_time: Some(sim_time),
-                };
-                match self
-                    .ring
-                    .try_enqueue(&sources, stamp)
-                    .map_err(|e| e.to_string())?
+        // Sync GPU annotation labels once per distinct scene objects snapshot.
+        if self.recognition
+            && self
+                .annotation_synced
+                .as_ref()
+                .is_none_or(|s| !Arc::ptr_eq(s, &self.objects))
+        {
+            self.annotation_synced = Some(self.objects.clone());
+            let labels = shape_labels_for(&self.objects);
+            let fits = self
+                .annotation
+                .as_ref()
+                .is_some_and(|a| labels.len() <= a.max_labels as usize);
+            if fits {
+                if let Some(ann) = self.annotation.as_mut()
+                    && ann.processor.set_labels(&labels).is_err()
                 {
-                    Some(ticket) => self.pending.push(Pending {
-                        ticket,
-                        sim_time,
-                        kind: PendingKind::Imu { due: imu_due },
-                    }),
-                    None => self.stats.dropped += 1,
+                    self.annotation = None;
+                }
+            } else {
+                self.annotation = build_annotation_gpu(engine, &self.mounts, &self.objects);
+                if let Some(ann) = self.annotation.as_ref() {
+                    let needed = self.max_camera_bytes + u64::from(ann.max_labels) * 32 + 16;
+                    self.ensure_ring_slot_bytes(engine, needed)?;
                 }
             }
         }
 
-        let lidar_due: Vec<(usize, u64)> = due
-            .iter()
-            .map(|s| (s.sensor_id as usize, s.sample_id))
-            .filter(|(i, _)| self.mounts[*i].resolved.spec.kind == SensorKind::Lidar)
-            .collect();
-        if let (Some(lidar), false) = (self.lidar.as_mut(), lidar_due.is_empty()) {
-            let mut scans = Vec::with_capacity(lidar_due.len());
-            let mut worlds = Vec::with_capacity(lidar_due.len());
-            for &(i, _) in &lidar_due {
-                let world = world_pose(&self.mounts[i]);
-                scans.push(MollaLidarScan {
-                    sensor_id: i as u64,
-                    pattern: LidarPattern::Terrestrial(scan_metadata(
-                        &self.mounts[i].resolved.spec,
-                        &world,
-                    )),
-                });
-                worlds.push(world);
-            }
-            let view = lidar
-                .dispatch_scene(engine, &self.scene, &self.state, &scans)
-                .map_err(|e| format!("lidar dispatch: {e}"))?;
-            let n = view.hits.ray_count;
-            let sources = [
-                view.hits.point.readback_source(0..n),
-                view.hits.distance.readback_source(0..n),
-                view.hits.shape.readback_source(0..n),
-            ]
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-            let pending_scans: Vec<PendingScan> = view
-                .scans
-                .iter()
-                .zip(&lidar_due)
-                .zip(worlds)
-                .map(|((range, &(mount, sample)), world)| PendingScan {
-                    mount,
-                    sample,
-                    ray_offset: range.ray_offset as usize,
-                    ray_count: range.ray_count as usize,
-                    meta: match range.scan.pattern {
-                        LidarPattern::Terrestrial(meta) => meta,
-                        LidarPattern::Aerial(_) => unreachable!("terrestrial scans only"),
-                    },
-                    capture: crate::sensor_capture::CapturePose::dispatched(&world),
-                    world,
-                })
-                .collect();
-            let stamp = ReadbackStamp {
-                sensor_id: lidar_due[0].0 as u64,
-                sample_id: lidar_due[0].1,
-                scene_revision: self.revision,
-                simulation_time: Some(sim_time),
-            };
-            match self
-                .ring
-                .try_enqueue(&sources, stamp)
-                .map_err(|e| e.to_string())?
-            {
-                Some(ticket) => self.pending.push(Pending {
-                    ticket,
-                    sim_time,
-                    kind: PendingKind::Lidar {
-                        scans: pending_scans,
-                    },
-                }),
-                None => self.stats.dropped += 1,
-            }
-        }
-
-        let camera_due: Vec<(usize, u64)> = due
-            .iter()
-            .map(|s| (s.sensor_id as usize, s.sample_id))
-            .filter(|(i, _)| self.mounts[*i].resolved.spec.kind == SensorKind::Camera)
-            .collect();
-        for (mount, sample) in camera_due {
-            let spec = self.mounts[mount].resolved.spec;
-            if spec.color && spec.render.is_bevy() {
-                self.render_requests.push(RenderRequest {
-                    mount,
-                    sample,
-                    sim_time,
-                });
-            }
-            let Some(camera) = self
-                .cameras
-                .iter_mut()
-                .find(|(m, _)| *m == mount)
-                .map(|(_, camera)| camera)
-            else {
-                continue;
-            };
-            let world = world_pose(&self.mounts[mount]);
-            let pose = MTransform::new(
-                world.position,
-                (world.rotation * camera_in_link()).normalize(),
-            );
-            camera
-                .set_camera_pose(0, pose)
-                .map_err(|e| format!("camera pose: {e}"))?;
-            camera
-                .dispatch_scene(engine, &self.scene, &self.state)
-                .map_err(|e| format!("camera dispatch: {e}"))?;
-            let pixels = spec.width as usize * spec.height as usize;
-            let sources = camera_channels(&spec)
-                .into_iter()
-                .map(|channel| camera.readback_source(channel, 0..pixels))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| e.to_string())?;
-            let stamp = ReadbackStamp {
-                sensor_id: mount as u64,
-                sample_id: sample,
-                scene_revision: self.revision,
-                simulation_time: Some(sim_time),
-            };
-            match self
-                .ring
-                .try_enqueue(&sources, stamp)
-                .map_err(|e| e.to_string())?
-            {
-                Some(ticket) => self.pending.push(Pending {
-                    ticket,
-                    sim_time,
-                    kind: PendingKind::Camera { mount, sample, objects: self.objects.clone() },
-                }),
-                None => self.stats.dropped += 1,
-            }
-        }
-
+        // Non-ray generic sensors run immediately; distance/light/radar rays
+        // plan into one async GPU raycast encoded in this tick's command batch.
         let generic_due: Vec<GenericSample<'_>> = due
             .iter()
             .filter(|s| is_generic(self.mounts[s.sensor_id as usize].resolved.spec.kind))
@@ -1416,11 +1749,544 @@ impl Rig {
                 }
             })
             .collect();
-        if !generic_due.is_empty() {
-            let generic = &mut self.generic;
-            let readings = physics.molla(|rigid| generic.sample(rigid, environment, &generic_due, sim_time))?;
-            self.ready.extend(readings);
+        let ray_plan = if generic_due.is_empty() {
+            PendingRayPlan::default()
+        } else {
+            let mut read_joint = |joint: usize| {
+                physics.molla(|rigid| {
+                    molla_sensors::joint_reading(rigid.model(), rigid.state(), joint)
+                        .map_err(|e| format!("position joint {joint}: {e}"))
+                })
+            };
+            let (ready, plan) = self.generic.sample_and_plan_rays(
+                &self.imu_model,
+                &self.state,
+                &mut read_joint,
+                environment,
+                &generic_due,
+                sim_time,
+            )?;
+            self.ready.extend(ready);
+            plan
+        };
+        if !ray_plan.is_empty() {
+            let needed_rays = ray_plan.origins.len() as u32;
+            let grow = self
+                .generic_rays
+                .as_ref()
+                .is_none_or(|g| g.capacity < needed_rays);
+            if grow {
+                let cap = needed_rays.max(MIN_GENERIC_RAY_CAPACITY).next_power_of_two();
+                self.generic_rays = Some(build_generic_ray_gpu(engine, cap)?);
+                self.ensure_ring_slot_bytes(engine, u64::from(cap) * 12)?;
+            }
         }
+
+        // Prepare due camera mounts, Bevy render requests, and CameraBatch buckets.
+        let camera_due: Vec<(usize, u64)> = due
+            .iter()
+            .map(|s| (s.sensor_id as usize, s.sample_id))
+            .filter(|(i, _)| self.mounts[*i].resolved.spec.kind == SensorKind::Camera)
+            .collect();
+        for &(mount, sample) in &camera_due {
+            let spec = self.mounts[mount].resolved.spec;
+            if spec.color && spec.render.is_bevy() {
+                self.render_requests.push(RenderRequest {
+                    mount,
+                    sample,
+                    sim_time,
+                });
+            }
+        }
+        let mut due_buckets: Vec<(usize, Vec<(usize, u64)>)> = Vec::new();
+        for (bucket_idx, bucket) in self.camera_buckets.iter_mut().enumerate() {
+            let mut entries: Vec<(usize, u64)> = camera_due
+                .iter()
+                .copied()
+                .filter(|(m, _)| bucket.mounts.contains(m))
+                .collect();
+            if entries.is_empty() {
+                continue;
+            }
+            entries.sort_unstable_by_key(|(m, _)| *m);
+            let want: Vec<usize> = entries.iter().map(|(m, _)| *m).collect();
+            if bucket.active != want || bucket.batch.is_none() {
+                bucket.batch = Some(build_camera_batch(engine, &self.mounts, &want)?);
+                bucket.active = want;
+            }
+            if let Some((batch, _)) = bucket.batch.as_mut() {
+                for &(mount, _) in &entries {
+                    let world = world_pose(&self.mounts[mount]);
+                    let pose = MTransform::new(
+                        world.position,
+                        (world.rotation * camera_in_link()).normalize(),
+                    );
+                    batch
+                        .set_camera_pose(mount as u64, pose)
+                        .map_err(|e| format!("camera pose: {e}"))?;
+                }
+            }
+            due_buckets.push((bucket_idx, entries));
+        }
+
+        // Prepare due IMU and LiDAR inputs before opening the shared command batch.
+        let imu_due: Vec<(usize, MQuat)> = due
+            .iter()
+            .map(|s| s.sensor_id as usize)
+            .filter(|&i| self.mounts[i].resolved.spec.kind.uses_imu())
+            .map(|i| (i, world_pose(&self.mounts[i]).rotation))
+            .collect();
+        let imu_dt = if self.imu.is_some() && !imu_due.is_empty() {
+            let fastest = self
+                .imu_mounts
+                .iter()
+                .map(|&i| self.mounts[i].resolved.spec.rate_hz)
+                .fold(f32::MIN, f32::max);
+            let slowest_due = imu_due
+                .iter()
+                .map(|&(i, _)| self.mounts[i].resolved.spec.rate_hz)
+                .fold(f32::MAX, f32::min);
+            // An IMU that skipped samples re-primes instead of differencing across the gap.
+            if self.last_imu_time.is_some_and(|t| sim_time - t > 2.0 / slowest_due as f64) {
+                if let Some((imu, _)) = self.imu.as_mut() {
+                    imu.reset();
+                }
+                self.last_imu_time = None;
+            }
+            Some(
+                self.last_imu_time
+                    .map(|t| sim_time - t)
+                    .filter(|dt| *dt > 0.0)
+                    .unwrap_or(1.0 / fastest as f64),
+            )
+        } else {
+            None
+        };
+
+        let lidar_due: Vec<(usize, u64)> = due
+            .iter()
+            .map(|s| (s.sensor_id as usize, s.sample_id))
+            .filter(|(i, _)| self.mounts[*i].resolved.spec.kind == SensorKind::Lidar)
+            .collect();
+        let (lidar_scans, lidar_worlds) = if self.lidar.is_some() && !lidar_due.is_empty() {
+            let mut scans = Vec::with_capacity(lidar_due.len());
+            let mut worlds = Vec::with_capacity(lidar_due.len());
+            for &(i, _) in &lidar_due {
+                let world = world_pose(&self.mounts[i]);
+                scans.push(MollaLidarScan {
+                    sensor_id: i as u64,
+                    pattern: LidarPattern::Terrestrial(scan_metadata(
+                        &self.mounts[i].resolved.spec,
+                        &world,
+                    )),
+                });
+                worlds.push(world);
+            }
+            (scans, worlds)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        // Encode every due GPU producer (IMU, LiDAR, batched cameras, GPU
+        // annotations, generic GPU rays) into ONE command batch submission.
+        let (
+            submission,
+            encoded_imu,
+            encoded_lidar,
+            encoded_cameras,
+            encoded_ann,
+            ann_entries,
+            encoded_rays,
+            imu_backpressured,
+            dropped_count,
+        ) = {
+            let mut cmd =
+                SensorCommandBatch::new(engine).map_err(|e| format!("sensor batch: {e}"))?;
+            let mut dropped_count = 0u64;
+            let mut imu_backpressured = false;
+
+            let encoded_imu = if let (Some((imu, pool)), Some(dt)) = (self.imu.as_mut(), imu_dt) {
+                let stamp = ReadbackStamp {
+                    sensor_id: u64::MAX,
+                    sample_id: due[0].sample_id,
+                    scene_revision: self.revision,
+                    simulation_time: Some(sim_time),
+                };
+                match imu
+                    .encode(&mut cmd, engine, &self.imu_model, &self.state, dt, pool, stamp)
+                    .map_err(|e| format!("imu encode: {e}"))?
+                {
+                    Some(sample) => Some(sample),
+                    None => {
+                        imu_backpressured = true;
+                        dropped_count += 1;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let encoded_lidar = if let (Some((lidar, pool)), false) =
+                (self.lidar.as_mut(), lidar_scans.is_empty())
+            {
+                let stamp = ReadbackStamp {
+                    sensor_id: lidar_due[0].0 as u64,
+                    sample_id: lidar_due[0].1,
+                    scene_revision: self.revision,
+                    simulation_time: Some(sim_time),
+                };
+                match lidar
+                    .encode_scene(
+                        &mut cmd,
+                        engine,
+                        &self.scene,
+                        &self.state,
+                        &lidar_scans,
+                        pool,
+                        stamp,
+                    )
+                    .map_err(|e| format!("lidar encode: {e}"))?
+                {
+                    Some(batch) => Some(batch),
+                    None => {
+                        dropped_count += 1;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let mut encoded_cameras: Vec<(Vec<(usize, u64)>, EncodedCameraBatch)> =
+                Vec::with_capacity(due_buckets.len());
+            for (bucket_idx, bucket) in self.camera_buckets.iter_mut().enumerate() {
+                let Some((_, entries)) = due_buckets.iter().find(|(i, _)| *i == bucket_idx) else {
+                    continue;
+                };
+                if let Some((batch, pool)) = bucket.batch.as_mut() {
+                    match batch
+                        .encode_scene(&mut cmd, engine, &self.scene, &self.state, pool, Some(sim_time))
+                        .map_err(|e| format!("camera encode: {e}"))?
+                    {
+                        Some(encoded) => encoded_cameras.push((entries.clone(), encoded)),
+                        None => dropped_count += entries.len() as u64,
+                    }
+                }
+            }
+
+            // Chain GPU AnnotationProcessor directly off pending camera outputs.
+            let mut ann_entries: Vec<(usize, usize)> = Vec::new();
+            let encoded_ann = if let Some(ann) = self.annotation.as_mut() {
+                let mut jobs = Vec::new();
+                for (cam_idx, (entries, encoded)) in encoded_cameras.iter().enumerate() {
+                    for &(mount, _) in entries {
+                        if self.mounts[mount].resolved.spec.recognition
+                            && let Ok(job) = encoded.annotation_job(mount as u64)
+                        {
+                            ann_entries.push((cam_idx, mount));
+                            jobs.push(job);
+                        }
+                    }
+                }
+                if jobs.is_empty() {
+                    None
+                } else {
+                    let stamp = ReadbackStamp {
+                        sensor_id: u64::MAX - 1,
+                        sample_id: due[0].sample_id,
+                        scene_revision: self.revision,
+                        simulation_time: Some(sim_time),
+                    };
+                    match ann
+                        .processor
+                        .encode_pending(&mut cmd, &jobs, &mut ann.pool, stamp)
+                        .map_err(|e| format!("annotation encode: {e}"))?
+                    {
+                        Some(encoded) => Some(encoded),
+                        None => {
+                            ann_entries.clear();
+                            None
+                        }
+                    }
+                }
+            } else {
+                None
+            };
+
+            let encoded_rays = if let (Some(rays), false) =
+                (self.generic_rays.as_mut(), ray_plan.is_empty())
+            {
+                let stamp = ReadbackStamp {
+                    sensor_id: u64::MAX - 2,
+                    sample_id: due[0].sample_id,
+                    scene_revision: self.revision,
+                    simulation_time: Some(sim_time),
+                };
+                match rays
+                    .raycaster
+                    .encode_scene(
+                        &mut cmd,
+                        engine,
+                        &self.scene,
+                        &self.state,
+                        &ray_plan.origins,
+                        &ray_plan.directions,
+                        ray_plan.max_distance,
+                        &mut rays.pool,
+                        stamp,
+                    )
+                    .map_err(|e| format!("generic ray encode: {e}"))?
+                {
+                    Some(encoded) => Some(encoded),
+                    None => {
+                        dropped_count += 1;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let submission = cmd.submit().map_err(|e| format!("sensor batch submit: {e}"))?;
+            (
+                submission,
+                encoded_imu,
+                encoded_lidar,
+                encoded_cameras,
+                encoded_ann,
+                ann_entries,
+                encoded_rays,
+                imu_backpressured,
+                dropped_count,
+            )
+        };
+
+        self.stats.dropped += dropped_count;
+        self.stats.gpu_batches += submission.stats.submissions;
+        self.stats.gpu_dispatches += submission.stats.kernel_dispatches;
+
+        if imu_dt.is_some() && !imu_backpressured {
+            self.last_imu_time = Some(sim_time);
+        }
+
+        // Enqueue async readbacks from the submitted direct-output frames.
+        if let Some(imu_sample) = encoded_imu
+            && !imu_sample.priming
+        {
+            let frame = submission
+                .frame(&imu_sample.frame)
+                .map_err(|e| e.to_string())?;
+            let n = self.imu_mounts.len();
+            let sources = [
+                frame
+                    .channel::<MVec3>(0)
+                    .and_then(|c| c.readback_source(0..n)),
+                frame
+                    .channel::<MVec3>(1)
+                    .and_then(|c| c.readback_source(0..n)),
+            ]
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+            let stamp = frame.stamp();
+            match self
+                .ring
+                .try_enqueue(&sources, stamp)
+                .map_err(|e| e.to_string())?
+            {
+                Some(ticket) => self.pending.push(Pending {
+                    ticket,
+                    sim_time,
+                    kind: PendingKind::Imu { due: imu_due },
+                }),
+                None => self.stats.dropped += 1,
+            }
+        }
+
+        if let Some(lidar_batch) = encoded_lidar {
+            let frame = submission
+                .frame(&lidar_batch.frame)
+                .map_err(|e| e.to_string())?;
+            let n = lidar_batch.ray_count;
+            let sources = [
+                frame
+                    .channel::<MVec3>(4)
+                    .and_then(|c| c.readback_source(0..n)),
+                frame
+                    .channel::<f64>(2)
+                    .and_then(|c| c.readback_source(0..n)),
+                frame
+                    .channel::<i32>(3)
+                    .and_then(|c| c.readback_source(0..n)),
+            ]
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+            let pending_scans: Vec<PendingScan> = lidar_batch
+                .scans
+                .iter()
+                .zip(&lidar_due)
+                .zip(lidar_worlds)
+                .map(|((range, &(mount, sample)), world)| PendingScan {
+                    mount,
+                    sample,
+                    ray_offset: range.ray_offset as usize,
+                    ray_count: range.ray_count as usize,
+                    meta: match range.scan.pattern {
+                        LidarPattern::Terrestrial(meta) => meta,
+                        LidarPattern::Aerial(_) => unreachable!("terrestrial scans only"),
+                    },
+                    capture: crate::sensor_capture::CapturePose::dispatched(&world),
+                    world,
+                })
+                .collect();
+            let stamp = frame.stamp();
+            match self
+                .ring
+                .try_enqueue(&sources, stamp)
+                .map_err(|e| e.to_string())?
+            {
+                Some(ticket) => self.pending.push(Pending {
+                    ticket,
+                    sim_time,
+                    kind: PendingKind::Lidar {
+                        scans: pending_scans,
+                    },
+                }),
+                None => self.stats.dropped += 1,
+            }
+        }
+
+        if let Some(ray_query) = encoded_rays {
+            let frame = submission
+                .frame(&ray_query.frame)
+                .map_err(|e| e.to_string())?;
+            let n = ray_plan.origins.len();
+            let sources = [
+                frame
+                    .channel::<f64>(2)
+                    .and_then(|c| c.readback_source(0..n)),
+                frame
+                    .channel::<i32>(3)
+                    .and_then(|c| c.readback_source(0..n)),
+            ]
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+            let stamp = frame.stamp();
+            match self
+                .ring
+                .try_enqueue(&sources, stamp)
+                .map_err(|e| e.to_string())?
+            {
+                Some(ticket) => self.pending.push(Pending {
+                    ticket,
+                    sim_time,
+                    kind: PendingKind::GenericRays {
+                        plan: ray_plan,
+                        shape_bodies: self.shape_bodies.clone(),
+                    },
+                }),
+                None => self.stats.dropped += 1,
+            }
+        }
+
+        let ann_frame = encoded_ann
+            .as_ref()
+            .map(|ann| submission.frame(&ann.frame).map_err(|e| e.to_string()))
+            .transpose()?;
+
+        for (cam_idx, (entries, encoded)) in encoded_cameras.iter().enumerate() {
+            for &(mount, sample) in entries {
+                let spec = self.mounts[mount].resolved.spec;
+                let Some((layout, group)) = encoded.image(mount as u64) else {
+                    continue;
+                };
+                let frame = submission.frame(&group.frame).map_err(|e| e.to_string())?;
+                let pixels = layout.pixels.clone();
+                let color = molla_color(&spec);
+                let has_depth = spec.depth || spec.recognition;
+                let has_shape = spec.recognition;
+                let ann_pos = ann_entries
+                    .iter()
+                    .position(|&(c, m)| c == cam_idx && m == mount);
+                let stamp = ReadbackStamp {
+                    sensor_id: mount as u64,
+                    sample_id: sample,
+                    scene_revision: self.revision,
+                    simulation_time: Some(sim_time),
+                };
+                let mut sources = Vec::new();
+                if color {
+                    sources.push(
+                        frame
+                            .channel::<u32>(1)
+                            .and_then(|c| c.readback_source(pixels.clone()))
+                            .map_err(|e| e.to_string())?,
+                    );
+                }
+                if has_depth {
+                    sources.push(
+                        frame
+                            .channel::<f64>(0)
+                            .and_then(|c| c.readback_source(pixels.clone()))
+                            .map_err(|e| e.to_string())?,
+                    );
+                }
+                if has_shape {
+                    sources.push(
+                        frame
+                            .channel::<u32>(4)
+                            .and_then(|c| c.readback_source(pixels.clone()))
+                            .map_err(|e| e.to_string())?,
+                    );
+                }
+                let mut has_annotation = false;
+                let mut has_boxes = false;
+                if let (Some(ann_image), Some(ann), Some(af)) =
+                    (ann_pos, encoded_ann.as_ref(), ann_frame)
+                {
+                    let ann_layout = &ann.layouts[ann_image];
+                    has_annotation = true;
+                    sources.push(
+                        af.channel::<u32>(3)
+                            .and_then(|c| c.readback_source(ann_image * 4..ann_image * 4 + 4))
+                            .map_err(|e| e.to_string())?,
+                    );
+                    if !ann_layout.boxes.is_empty() {
+                        has_boxes = true;
+                        sources.push(
+                            af.channel::<DeviceBoundingBox>(2)
+                                .and_then(|c| c.readback_source(ann_layout.boxes.clone()))
+                                .map_err(|e| e.to_string())?,
+                        );
+                    }
+                }
+                match self
+                    .ring
+                    .try_enqueue(&sources, stamp)
+                    .map_err(|e| e.to_string())?
+                {
+                    Some(ticket) => self.pending.push(Pending {
+                        ticket,
+                        sim_time,
+                        kind: PendingKind::Camera {
+                            mount,
+                            sample,
+                            objects: self.objects.clone(),
+                            has_color: color,
+                            has_depth,
+                            has_shape,
+                            has_annotation,
+                            has_boxes,
+                        },
+                    }),
+                    None => self.stats.dropped += 1,
+                }
+            }
+        }
+
         self.stats.samples += 1;
         self.stats.upload_bytes += (self.state.body_q.len() * 64) as u64;
         Ok(())
@@ -1460,22 +2326,78 @@ impl Rig {
             };
             self.stats.readback_bytes += frame.byte_len() as u64;
             match pending.kind {
-                PendingKind::Camera { mount, sample, objects } => {
+                PendingKind::GenericRays { plan, shape_bodies } => {
+                    let distances: Vec<f64> = frame.channel(0).unwrap_or_default();
+                    let shapes: Vec<i32> = frame.channel(1).unwrap_or_default();
+                    match self.generic.resolve_rays(
+                        plan,
+                        &distances,
+                        &shapes,
+                        &shape_bodies,
+                        pending.sim_time,
+                    ) {
+                        Ok(readings) => {
+                            for (mount, mut reading) in readings {
+                                reading.stamp_ms = stamp_ms;
+                                let m = &mut self.mounts[mount];
+                                let delivered = sink(&m.name, SensorReading::Measurement(&reading));
+                                self.stats.frames += 1;
+                                m.record(delivered, reading.count.max(1));
+                            }
+                        }
+                        Err(error) => warn!("gearbox-sensors: {error}"),
+                    }
+                }
+                PendingKind::Camera {
+                    mount,
+                    sample,
+                    objects,
+                    has_color,
+                    has_depth,
+                    has_shape,
+                    has_annotation,
+                    has_boxes,
+                } => {
                     let m = &mut self.mounts[mount];
                     let spec = m.resolved.spec;
                     let pixels = (spec.width * spec.height) as usize;
-                    let color = molla_color(&spec);
-                    let traced = camera_channels(&spec);
-                    let slot = |c: CameraChannels| traced.iter().position(|&t| t == c);
-                    let colors: Vec<u32> = slot(CameraChannels::COLOR)
-                        .map_or_else(Vec::new, |i| frame.channel(i).unwrap_or_default());
-                    let depths: Vec<f64> = slot(CameraChannels::DEPTH)
-                        .map_or_else(Vec::new, |i| frame.channel(i).unwrap_or_default());
-                    let shapes: Vec<u32> = slot(CameraChannels::SHAPE_INDEX)
-                        .map_or_else(Vec::new, |i| frame.channel(i).unwrap_or_default());
-                    if (color && colors.len() != pixels)
-                        || (spec.depth && depths.len() != pixels)
-                        || (spec.recognition && shapes.len() != pixels)
+                    let mut ch = 0usize;
+                    let colors: Vec<u32> = if has_color {
+                        let v = frame.channel(ch).unwrap_or_default();
+                        ch += 1;
+                        v
+                    } else {
+                        Vec::new()
+                    };
+                    let depths: Vec<f64> = if has_depth {
+                        let v = frame.channel(ch).unwrap_or_default();
+                        ch += 1;
+                        v
+                    } else {
+                        Vec::new()
+                    };
+                    let shapes: Vec<u32> = if has_shape {
+                        let v = frame.channel(ch).unwrap_or_default();
+                        ch += 1;
+                        v
+                    } else {
+                        Vec::new()
+                    };
+                    let ann_counts = if has_annotation {
+                        let words: Vec<u32> = frame.channel(ch).unwrap_or_default();
+                        ch += 1;
+                        AnnotationCounts::from_words(&words).ok()
+                    } else {
+                        None
+                    };
+                    let ann_boxes: Vec<DeviceBoundingBox> = if has_boxes {
+                        frame.channel(ch).unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    if (has_color && colors.len() != pixels)
+                        || (has_depth && depths.len() != pixels)
+                        || (has_shape && shapes.len() != pixels)
                     {
                         warn!(
                             "gearbox-sensors: camera `{}` returned {} colors and {} depths for {}x{}",
@@ -1491,7 +2413,7 @@ impl Rig {
                     let link_index = m.resolved.link as u32;
                     let mut send = |wire: &CameraFrame| sink(&name, SensorReading::Camera(wire));
                     let mut delivered = true;
-                    if color {
+                    if has_color {
                         let bytes: Vec<u8> = colors.iter().flat_map(|c| c.to_le_bytes()).collect();
                         delivered &= camera_chunks(
                             &name, link_index, &spec, pending.sim_time, stamp_ms, sample,
@@ -1516,15 +2438,51 @@ impl Rig {
                         );
                     }
                     if spec.recognition {
-                        let seen = molla_sensors::recognize(
-                            spec.width,
-                            spec.height,
-                            spec.vfov as f64,
-                            &depths,
-                            &shapes,
-                            &|shape| objects.shapes.get(shape as usize).copied().flatten().map(u64::from),
-                            1,
-                        );
+                        let seen = match ann_counts {
+                            Some(c) if c.visible_instances == 0 => Vec::new(),
+                            Some(_) => match bounding_row_span(&ann_boxes, spec.height) {
+                                Some((min_y, max_y)) => {
+                                    let rows = max_y - min_y + 1;
+                                    let start = min_y as usize * spec.width as usize;
+                                    let end = (max_y as usize + 1) * spec.width as usize;
+                                    recognize_rows(
+                                        spec.width,
+                                        spec.height,
+                                        spec.vfov as f64,
+                                        min_y,
+                                        rows,
+                                        &depths[start..end],
+                                        &shapes[start..end],
+                                        &|shape| {
+                                            objects
+                                                .shapes
+                                                .get(shape as usize)
+                                                .copied()
+                                                .flatten()
+                                                .map(u64::from)
+                                        },
+                                        1,
+                                    )
+                                }
+                                None => Vec::new(),
+                            },
+                            None => molla_sensors::recognize(
+                                spec.width,
+                                spec.height,
+                                spec.vfov as f64,
+                                &depths,
+                                &shapes,
+                                &|shape| {
+                                    objects
+                                        .shapes
+                                        .get(shape as usize)
+                                        .copied()
+                                        .flatten()
+                                        .map(u64::from)
+                                },
+                                1,
+                            ),
+                        };
                         let mut reading = recognition(&name, link_index, pending.sim_time, sample, &seen, &objects.labels);
                         reading.stamp_ms = stamp_ms;
                         delivered &= sink(&name, SensorReading::Measurement(&reading));
@@ -1792,6 +2750,64 @@ fn body_order(rigid: &RigidScene) -> Vec<u64> {
     bodies.into_iter().map(|(_, h)| h).collect()
 }
 
+/// Owning body per shape index in the compiled physics model, used to map
+/// GPU raycast shape hits back to [`MollaBodyId`].
+fn shape_bodies(rigid: &RigidScene) -> Arc<[MollaBodyId]> {
+    rigid
+        .model()
+        .shape_body
+        .host()
+        .map(|bodies| {
+            bodies
+                .iter()
+                .map(|&b| {
+                    if b >= 0 {
+                        MollaBodyId::from_index(b as usize)
+                    } else {
+                        MollaBodyId::NONE
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into()
+        })
+        .unwrap_or_else(|_| Arc::from([]))
+}
+
+/// Bodies detectable by a machine's radars: every non-own dynamic body
+/// defaults to 1 m², overridden by an authored [`RadarCrossSection`] (0 opts
+/// out), and fixed/kinematic bodies with a positive authored cross-section
+/// act as static radar reflectors.
+fn radar_targets(
+    rigid: &RigidScene,
+    own: &HashSet<u64>,
+    rcs: &dyn Fn(Entity) -> Option<f64>,
+) -> Vec<RadarTarget> {
+    let mut out = Vec::new();
+    for (handle, desc) in rigid.bodies() {
+        if own.contains(&handle.to_bits()) {
+            continue;
+        }
+        let authored = (desc.user_tag != 0)
+            .then(|| rcs(Entity::from_bits(desc.user_tag)))
+            .flatten();
+        let cross_section = match authored {
+            Some(v) if v.is_finite() && v > 0.0 => Some(v),
+            Some(_) => None,
+            None if desc.kind == molla_sim::runtime::BodyKind::Dynamic => Some(1.0),
+            None => None,
+        };
+        if let Some(cross_section) = cross_section
+            && let Some(body) = rigid.body_index(handle)
+        {
+            out.push(RadarTarget {
+                body,
+                cross_section,
+            });
+        }
+    }
+    out
+}
+
 /// A rig's own copy of the bodies: the IMU's model and the state it samples.
 fn snapshot_bodies(
     engine: &Engine,
@@ -1893,24 +2909,14 @@ mod tests {
     #[test]
     fn lidar_sweeps_forward_with_zenith_up() {
         let spec = SensorSpec {
-            kind: SensorKind::Lidar,
             rate_hz: 10.0,
             columns: 4,
             rows: 1,
             hfov: std::f32::consts::TAU,
             vfov: 0.0,
             range_m: 50.0,
-            width: 128,
-            height: 96,
             render: crate::links::CameraRender::Geometry,
-            color: true,
-            depth: true,
-            recognition: false,
-            variant: crate::links::SensorVariant::Default,
-            rays: 1,
-            aperture: 0.0,
-            min_range_m: 1.0,
-            channel: 0,
+            ..SensorSpec::defaults(SensorKind::Lidar, false)
         };
         let world = MTransform::new(MVec3::new(1.0, 2.0, 3.0), MQuat::IDENTITY);
         let meta = scan_metadata(&spec, &world);
@@ -2057,7 +3063,6 @@ mod tests {
         );
         let mount = MTransform::new(MVec3::ZERO, MQuat::from_rotation_x(-FRAC_PI_2));
         let lidar_spec = SensorSpec {
-            kind: SensorKind::Lidar,
             rate_hz: 50.0,
             columns: 8,
             rows: 1,
@@ -2070,11 +3075,7 @@ mod tests {
             color: true,
             depth: true,
             recognition: false,
-            variant: crate::links::SensorVariant::Default,
-            rays: 1,
-            aperture: 0.0,
-            min_range_m: 1.0,
-            channel: 0,
+            ..SensorSpec::defaults(SensorKind::Lidar, false)
         };
         let mounts = vec![
             ResolvedMount {
@@ -2167,7 +3168,18 @@ mod tests {
         let mut shared = None;
         let model = world.backend.molla(|scene| scene.model_stamp());
         let shared = shared_scene(&engine, &mut shared, &*world.backend, &model, &|_| None).unwrap();
-        let mut rig = Rig::build(&engine, &*world.backend, mounts, revision, 0.0, shared, &label, &[]).unwrap();
+        let mut rig = Rig::build(
+            &engine,
+            &*world.backend,
+            mounts,
+            revision,
+            0.0,
+            shared,
+            &label,
+            &|_| None,
+            &[],
+        )
+        .unwrap();
         let mut imu = None;
         let mut lidar = None;
         let mut depth = None;
@@ -2181,7 +3193,7 @@ mod tests {
             world.step();
             let environment = SensorEnvironment {
                 light: molla_sensors::LightEnvironment {
-                    sources: vec![sun.clone()],
+                    sources: vec![sun],
                     sky: 50.0,
                     up: MVec3::Y,
                 },
@@ -2202,7 +3214,7 @@ mod tests {
                 match reading {
                     SensorReading::Imu(reading) => {
                         assert_eq!(link, "imu_link");
-                        imu = Some(reading.clone());
+                        imu = Some(*reading);
                     }
                     SensorReading::Lidar(scan) => {
                         assert_eq!(link, "lidar_link");
@@ -2349,11 +3361,7 @@ mod tests {
         world.insert_collider(ColliderDesc::new(slab).parent(ground).translation(DVec3::new(0.0, -0.5, 0.0))).unwrap();
         let carrier = world.insert_body(BodyDesc::fixed().pose(Pose::from_translation(DVec3::Y)));
         let seer = SensorSpec {
-            kind: SensorKind::Camera,
             rate_hz: 50.0,
-            columns: 8,
-            rows: 1,
-            hfov: std::f32::consts::TAU,
             vfov: 60f32.to_radians(),
             range_m: 20.0,
             width: 32,
@@ -2362,11 +3370,7 @@ mod tests {
             color: false,
             depth: false,
             recognition: true,
-            variant: crate::links::SensorVariant::Default,
-            rays: 1,
-            aperture: 0.0,
-            min_range_m: 1.0,
-            channel: 0,
+            ..SensorSpec::defaults(SensorKind::Camera, false)
         };
         let mount = ResolvedMount {
             link: 1,
@@ -2382,7 +3386,18 @@ mod tests {
         let mut rigs = MachineSensorRigs::default();
         let model = world.backend.molla(|scene| scene.model_stamp());
         let shared = shared_scene(&engine, &mut rigs.scene, &*world.backend, &model, &|_| None).unwrap();
-        let mut rig = Rig::build(&engine, &*world.backend, vec![mount], 0, 0.0, shared, &label, &[]).unwrap();
+        let mut rig = Rig::build(
+            &engine,
+            &*world.backend,
+            vec![mount],
+            0,
+            0.0,
+            shared,
+            &label,
+            &|_| None,
+            &[],
+        )
+        .unwrap();
         rig.model = Some(model);
         rigs.rigs.insert("bot".into(), rig);
         let seen = |rigs: &mut MachineSensorRigs, world: &mut PhysicsWorld| {
@@ -2413,8 +3428,18 @@ mod tests {
         assert_eq!(bodies, rigs.rigs["bot"].bodies);
         let build = world.backend.molla(|rigid| {
             let objects = HashMap::from([("bot".to_string(), Arc::new(shape_objects(rigid, &HashSet::new(), &label)))]);
-            build_scene_off_frame(&engine, rigid, shape_colors(rigid, &|_| None))
-                .map(|task| SceneBuild { model: model.clone(), bodies, objects, task })
+            let targets = HashMap::from([("bot".to_string(), radar_targets(rigid, &HashSet::new(), &|_| None))]);
+            let shape_bodies = shape_bodies(rigid);
+            build_scene_off_frame(&engine, rigid, shape_colors(rigid, &|_| None)).map(|task| {
+                SceneBuild {
+                    model: model.clone(),
+                    bodies,
+                    shape_bodies,
+                    objects,
+                    radar_targets: targets,
+                    task,
+                }
+            })
         });
         rigs.building = Some(build.unwrap());
         assert!(!seen(&mut rigs, &mut world).contains("plant"), "the rig samples its old scene meanwhile");
@@ -2448,24 +3473,16 @@ mod tests {
         let start = Pose { translation: offset + DVec3::new(0.0, 1.0, 0.0), rotation: DQuat::from_rotation_y(0.4) };
         let carrier = world.insert_body(BodyDesc::fixed().pose(start));
         let spec = SensorSpec {
-            kind: SensorKind::Lidar,
             rate_hz: 50.0,
             columns: 64,
             rows: 1,
             hfov: std::f32::consts::TAU,
             vfov: 0.0,
             range_m: 20.0,
-            width: 1,
-            height: 1,
             render: crate::links::CameraRender::Geometry,
             color: false,
             depth: false,
-            recognition: false,
-            variant: crate::links::SensorVariant::Default,
-            rays: 1,
-            aperture: 0.0,
-            min_range_m: 0.1,
-            channel: 0,
+            ..SensorSpec::defaults(SensorKind::Lidar, false)
         };
         let mount = ResolvedMount {
             link: 1,
@@ -2479,7 +3496,18 @@ mod tests {
         let mut shared = None;
         let model = world.backend.molla(|scene| scene.model_stamp());
         let shared = shared_scene(&engine, &mut shared, &*world.backend, &model, &|_| None).unwrap();
-        let mut rig = Rig::build(&engine, &*world.backend, vec![mount], 0, 0.0, shared, &|_| None, &[]).unwrap();
+        let mut rig = Rig::build(
+            &engine,
+            &*world.backend,
+            vec![mount],
+            0,
+            0.0,
+            shared,
+            &|_| None,
+            &|_| None,
+            &[],
+        )
+        .unwrap();
         rig.machine = "rover".into();
         let mut sweeps = Vec::new();
         for _ in 0..12 {
@@ -2560,5 +3588,432 @@ mod tests {
             )
             .unwrap();
         assert_eq!(label.as_deref(), Some("percy:/Fleet/Percy/body"));
+    }
+
+    #[test]
+    fn resolve_mounts_isolates_broken_links_from_healthy_siblings() {
+        use crate::links::{LinkRole, LinkSpec, LinkTree};
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        PrimIndex::track(&mut world);
+        let scene_root = world.spawn(GlobalTransform::IDENTITY).id();
+        let chassis = world
+            .spawn((GlobalTransform::IDENTITY, UsdPrimRef::new("/robot/chassis"), ChildOf(scene_root)))
+            .id();
+        let _imu = world
+            .spawn((GlobalTransform::from_xyz(0.0, 1.0, 0.0), UsdPrimRef::new("/robot/chassis/imu"), ChildOf(chassis)))
+            .id();
+        let _bad_pos = world
+            .spawn((GlobalTransform::IDENTITY, UsdPrimRef::new("/robot/chassis/bad_pos"), ChildOf(chassis)))
+            .id();
+        let _orphan = world
+            .spawn((GlobalTransform::IDENTITY, UsdPrimRef::new("/robot/orphan_lidar"), ChildOf(scene_root)))
+            .id();
+
+        let mut physics = PhysicsWorld::with_backend(Box::new(MollaBackend::default()));
+        let chassis_body = physics.insert_body(BodyDesc::dynamic());
+        physics.entity_to_body.insert(chassis, chassis_body);
+        world.insert_resource(physics);
+
+        let mk_link = |name: &str, prim: &str, role, parent: Option<&str>, body: Option<&str>, sensor| LinkSpec {
+            name: name.into(),
+            prim_path: prim.into(),
+            role,
+            parent: parent.map(String::from),
+            joint_prim: None,
+            body_prim: body.map(String::from),
+            static_offset: None,
+            coupling: None,
+            element: None,
+            values: Vec::new(),
+            sensor,
+        };
+        let tree = LinkTree {
+            links: vec![
+                mk_link("base_link", "/robot/chassis", LinkRole::Base, None, Some("/robot/chassis"), None),
+                mk_link("imu", "/robot/chassis/imu", LinkRole::Sensor, Some("base_link"), None, Some(SensorSpec::defaults(SensorKind::Imu, false))),
+                mk_link("bad_pos", "/robot/chassis/bad_pos", LinkRole::Sensor, Some("base_link"), None, Some(SensorSpec::defaults(SensorKind::Position, false))),
+                mk_link("orphan_lidar", "/robot/orphan_lidar", LinkRole::Sensor, None, None, Some(SensorSpec::defaults(SensorKind::Lidar, false))),
+            ],
+            ..Default::default()
+        };
+
+        let resolution = world
+            .run_system_once(
+                move |physics: Res<PhysicsWorld>,
+                      prim_index: Res<PrimIndex>,
+                      transforms: Query<&GlobalTransform>| {
+                    resolve_mounts(&physics, &tree, scene_root, &prim_index, &transforms)
+                },
+            )
+            .unwrap();
+        assert_eq!(resolution.mounts.len(), 1, "healthy IMU link still resolves");
+        assert_eq!(resolution.mounts[0].name, "imu");
+        assert_eq!(resolution.failed.len(), 2, "{:?}", resolution.failed);
+        assert!(resolution.failed.iter().any(|(n, _)| n == "bad_pos"));
+        assert!(resolution.failed.iter().any(|(n, _)| n == "orphan_lidar"));
+    }
+
+    #[test]
+    fn attach_sensor_metadata_reads_rcs_and_label_from_usd() {
+        let dir = std::env::temp_dir().join("gearbox-sensor-meta-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("meta-{}.usda", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"#usda 1.0
+(
+    defaultPrim = "World"
+)
+def Xform "World"
+{
+    def Cube "reflector"
+    {
+        float gearbox:radar:crossSection = 12.5
+        token gearbox:sensor:label = "reflector_north"
+    }
+    def Cube "stealth"
+    {
+        float gearbox:value:radar_cross_section = 0
+    }
+}
+"#,
+        )
+        .unwrap();
+        let stage = openusd::usd::Stage::open(path.to_str().unwrap()).expect("open stage");
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        let e1 = world.spawn_empty().id();
+        let e2 = world.spawn_empty().id();
+        crate::physics::attach::attach_sensor_metadata(&mut world, e1, &stage, "/World/reflector");
+        crate::physics::attach::attach_sensor_metadata(&mut world, e2, &stage, "/World/stealth");
+        assert_eq!(world.get::<RadarCrossSection>(e1), Some(&RadarCrossSection(12.5)));
+        assert_eq!(world.get::<SensorLabel>(e1).map(|l| l.0.as_str()), Some("reflector_north"));
+        assert_eq!(world.get::<RadarCrossSection>(e2), Some(&RadarCrossSection(0.0)));
+        assert!(world.get::<SensorLabel>(e2).is_none());
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn single_command_batch_combines_imu_lidar_batched_cameras_annotations_and_gpu_rays() {
+        let engine = Engine::new_gpu().expect("GPU adapter");
+        let mut world = PhysicsWorld::with_backend(Box::new(MollaBackend::default()));
+        let ground = world.insert_body(BodyDesc::fixed());
+        world
+            .insert_collider(
+                ColliderDesc::new(Shape::Cuboid {
+                    half_extents: DVec3::new(20.0, 0.5, 20.0),
+                })
+                .parent(ground)
+                .translation(DVec3::new(0.0, -0.5, 0.0)),
+            )
+            .unwrap();
+        let carrier = world.insert_body(BodyDesc::fixed().pose(Pose::from_translation(DVec3::Y)));
+        let box_entity = Entity::from_raw_u32(77).unwrap();
+        let crate_body = world.insert_body(
+            BodyDesc::dynamic()
+                .pose(Pose::from_translation(DVec3::new(4.0, 0.5, 0.0)))
+                .entity(box_entity),
+        );
+        world
+            .insert_collider(
+                ColliderDesc::new(Shape::Cuboid {
+                    half_extents: DVec3::splat(0.4),
+                })
+                .density(500.0)
+                .parent(crate_body)
+                .entity(box_entity),
+            )
+            .unwrap();
+
+        let mount = MTransform::new(MVec3::ZERO, MQuat::from_rotation_x(-FRAC_PI_2));
+        let cam_spec = SensorSpec {
+            rate_hz: 50.0,
+            vfov: 60f32.to_radians(),
+            range_m: 20.0,
+            width: 32,
+            height: 24,
+            render: crate::links::CameraRender::Geometry,
+            color: true,
+            depth: true,
+            recognition: true,
+            ..SensorSpec::defaults(SensorKind::Camera, false)
+        };
+        let mounts = vec![
+            ResolvedMount {
+                link: 1,
+                name: "imu".into(),
+                spec: SensorSpec { rate_hz: 50.0, ..SensorSpec::defaults(SensorKind::Imu, false) },
+                body: carrier,
+                entity: None,
+                joint: None,
+                local: mount,
+            },
+            ResolvedMount {
+                link: 2,
+                name: "lidar".into(),
+                spec: SensorSpec {
+                    rate_hz: 50.0,
+                    columns: 16,
+                    rows: 1,
+                    vfov: 0.0,
+                    range_m: 20.0,
+                    ..SensorSpec::defaults(SensorKind::Lidar, false)
+                },
+                body: carrier,
+                entity: None,
+                joint: None,
+                local: mount,
+            },
+            ResolvedMount {
+                link: 3,
+                name: "cam_a".into(),
+                spec: cam_spec,
+                body: carrier,
+                entity: None,
+                joint: None,
+                local: mount,
+            },
+            ResolvedMount {
+                link: 4,
+                name: "cam_b".into(),
+                spec: cam_spec,
+                body: carrier,
+                entity: None,
+                joint: None,
+                local: mount,
+            },
+            ResolvedMount {
+                link: 5,
+                name: "dist".into(),
+                spec: SensorSpec { rate_hz: 50.0, range_m: 20.0, ..SensorSpec::defaults(SensorKind::Distance, false) },
+                body: carrier,
+                entity: None,
+                joint: None,
+                local: mount,
+            },
+            ResolvedMount {
+                link: 6,
+                name: "radar".into(),
+                spec: SensorSpec {
+                    rate_hz: 50.0,
+                    hfov: 90f32.to_radians(),
+                    vfov: 40f32.to_radians(),
+                    range_m: 20.0,
+                    ..SensorSpec::defaults(SensorKind::Radar, false)
+                },
+                body: carrier,
+                entity: None,
+                joint: None,
+                local: mount,
+            },
+        ];
+        let mut shared = None;
+        let model = world.backend.molla(|scene| scene.model_stamp());
+        let shared = shared_scene(&engine, &mut shared, &*world.backend, &model, &|_| None).unwrap();
+        let label = |e| (e == box_entity).then(|| "box77".to_string());
+        let mut rig = Rig::build(&engine, &*world.backend, mounts, 0, 0.0, shared, &label, &|_| None, &[]).unwrap();
+        assert!(rig.annotation.is_some(), "GPU annotation processor built");
+        assert_eq!(rig.camera_buckets.len(), 1, "same-rate cameras share one bucket");
+
+        // Sample on a tick where every 50 Hz sensor is due -> exactly 1 GPU batch.
+        let mut seen = HashSet::new();
+        for _ in 0..6 {
+            world.step();
+            let before_batches = rig.stats.gpu_batches;
+            let before_samples = rig.stats.samples;
+            rig.sample(&engine, &*world.backend, world.simulated_seconds, &SensorEnvironment::default(), &mut |_| true)
+                .unwrap();
+            if rig.stats.samples > before_samples {
+                assert_eq!(
+                    rig.stats.gpu_batches - before_batches,
+                    1,
+                    "all due GPU sensors encode into one SensorCommandBatch"
+                );
+            }
+            let wait = wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(5)) };
+            engine.device().unwrap().poll(wait).unwrap();
+            rig.collect(0, &mut |link, _| {
+                seen.insert(link.to_string());
+                true
+            });
+        }
+        // Both homogeneous cameras share 1 group inside CameraBatch.
+        assert_eq!(rig.camera_buckets[0].batch.as_ref().unwrap().0.group_count(), 1);
+        for link in ["imu", "lidar", "cam_a", "cam_b", "dist", "radar"] {
+            assert!(seen.contains(link), "missing reading from {link}: {seen:?}");
+        }
+
+        // Unsubscribing cam_b shrinks the active CameraBatch to cam_a only.
+        let mut cam_links = HashSet::new();
+        for _ in 0..4 {
+            world.step();
+            rig.sample(&engine, &*world.backend, world.simulated_seconds, &SensorEnvironment::default(), &mut |l| l == "cam_a")
+                .unwrap();
+            let wait = wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(5)) };
+            engine.device().unwrap().poll(wait).unwrap();
+            rig.collect(0, &mut |link, _| {
+                cam_links.insert(link.to_string());
+                true
+            });
+        }
+        assert_eq!(rig.camera_buckets[0].active.len(), 1);
+        assert!(cam_links.contains("cam_a") && !cam_links.contains("cam_b"), "{cam_links:?}");
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn radar_targets_respect_authored_rcs_opt_out_and_static_reflectors() {
+        let engine = Engine::new_gpu().expect("GPU adapter");
+        let mut world = PhysicsWorld::with_backend(Box::new(MollaBackend::default()));
+        let carrier = world.insert_body(BodyDesc::fixed().pose(Pose::from_translation(DVec3::Y)));
+
+        let e_default = Entity::from_raw_u32(10).unwrap();
+        let e_strong = Entity::from_raw_u32(11).unwrap();
+        let e_stealth = Entity::from_raw_u32(12).unwrap();
+        let e_static = Entity::from_raw_u32(13).unwrap();
+
+        let add_box = |world: &mut PhysicsWorld, desc: BodyDesc, entity: Entity| {
+            let body = world.insert_body(desc.entity(entity));
+            world
+                .insert_collider(
+                    ColliderDesc::new(Shape::Cuboid { half_extents: DVec3::splat(0.25) })
+                        .density(1000.0)
+                        .parent(body)
+                        .entity(entity),
+                )
+                .unwrap();
+            body
+        };
+        // Default 1 m² dynamic at 5 m ahead (left of center).
+        add_box(&mut world, BodyDesc::dynamic().pose(Pose::from_translation(DVec3::new(5.0, 1.0, -1.0))), e_default);
+        // Strong 10 m² dynamic at the exact same range (right of center) -> +10 dB.
+        add_box(&mut world, BodyDesc::dynamic().pose(Pose::from_translation(DVec3::new(5.0, 1.0, 1.0))), e_strong);
+        // Opted-out 0 m² dynamic at 3 m -> must not be detected.
+        add_box(&mut world, BodyDesc::dynamic().pose(Pose::from_translation(DVec3::new(3.0, 1.0, 0.0))), e_stealth);
+        // Fixed static reflector with 5 m² at (8, 1, 3.5) (clear of all foreground boxes) -> must be detected!
+        add_box(&mut world, BodyDesc::fixed().pose(Pose::from_translation(DVec3::new(8.0, 1.0, 3.5))), e_static);
+
+        let rcs = |e: Entity| match e {
+            e if e == e_strong => Some(10.0),
+            e if e == e_stealth => Some(0.0),
+            e if e == e_static => Some(5.0),
+            _ => None,
+        };
+        let mount = ResolvedMount {
+            link: 1,
+            name: "radar".into(),
+            spec: SensorSpec {
+                rate_hz: 50.0,
+                hfov: 90f32.to_radians(),
+                vfov: 40f32.to_radians(),
+                range_m: 30.0,
+                ..SensorSpec::defaults(SensorKind::Radar, false)
+            },
+            body: carrier,
+            entity: None,
+            joint: None,
+            local: MTransform::new(MVec3::ZERO, MQuat::from_rotation_x(-FRAC_PI_2)),
+        };
+        let mut shared = None;
+        let model = world.backend.molla(|scene| scene.model_stamp());
+        let shared = shared_scene(&engine, &mut shared, &*world.backend, &model, &|_| None).unwrap();
+        let mut rig = Rig::build(&engine, &*world.backend, vec![mount], 0, 0.0, shared, &|_| None, &rcs, &[]).unwrap();
+
+        let mut reading = None;
+        for _ in 0..4 {
+            world.step();
+            rig.sample(&engine, &*world.backend, world.simulated_seconds, &SensorEnvironment::default(), &mut |_| true)
+                .unwrap();
+            let wait = wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(5)) };
+            engine.device().unwrap().poll(wait).unwrap();
+            rig.collect(0, &mut |_, r| {
+                if let SensorReading::Measurement(m) = r {
+                    reading = Some(m.clone());
+                }
+                true
+            });
+        }
+        let m = reading.expect("radar reading");
+        // Expect 3 targets: default (~5.1 m), strong (~5.1 m), static reflector (~8.0 m). Stealth at 3 m is absent.
+        assert_eq!(m.count, 3, "values: {:?}", m.values);
+        let recs: Vec<&[f64]> = m.records().collect();
+        assert!(recs.iter().all(|r| r[0] > 4.5), "stealth target at 3 m must be excluded: {recs:?}");
+        // Find the two ~5.1 m targets by azimuth sign (+az is left/-Z in sim, -az is right/+Z in sim).
+        let (left, right) = if recs[0][1] > recs[1][1] { (recs[0], recs[1]) } else { (recs[1], recs[0]) };
+        let power_diff_db = right[4] - left[4];
+        assert!(
+            (power_diff_db - 10.0).abs() < 0.25,
+            "10 m² vs 1 m² at equal distance should differ by +10 dB, got {power_diff_db:.2} dB ({recs:?})"
+        );
+        assert!((recs[2][0] - (64.0 + 12.25f64).sqrt()).abs() < 0.1, "static reflector at ~8.73 m: {:?}", recs[2]);
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn camera_physical_optics_renders_on_gpu() {
+        let engine = Engine::new_gpu().expect("GPU adapter");
+        let mut world = PhysicsWorld::with_backend(Box::new(MollaBackend::default()));
+        let wall = world.insert_body(BodyDesc::fixed());
+        world
+            .insert_collider(
+                ColliderDesc::new(Shape::Cuboid { half_extents: DVec3::new(0.5, 2.0, 5.0) })
+                    .parent(wall)
+                    .translation(DVec3::new(5.0, 1.0, 0.0)),
+            )
+            .unwrap();
+        let carrier = world.insert_body(BodyDesc::fixed().pose(Pose::from_translation(DVec3::Y)));
+        let spec = SensorSpec {
+            rate_hz: 50.0,
+            vfov: 60f32.to_radians(),
+            range_m: 20.0,
+            width: 32,
+            height: 24,
+            render: crate::links::CameraRender::Geometry,
+            color: true,
+            depth: true,
+            lens_diameter_m: 0.08,
+            focal_distance_m: 4.5,
+            aperture_samples: 4,
+            ..SensorSpec::defaults(SensorKind::Camera, false)
+        };
+        let mount = ResolvedMount {
+            link: 1,
+            name: "dof_cam".into(),
+            spec,
+            body: carrier,
+            entity: None,
+            joint: None,
+            local: MTransform::new(MVec3::ZERO, MQuat::from_rotation_x(-FRAC_PI_2)),
+        };
+        let mut shared = None;
+        let model = world.backend.molla(|scene| scene.model_stamp());
+        let shared = shared_scene(&engine, &mut shared, &*world.backend, &model, &|_| None).unwrap();
+        let mut rig = Rig::build(&engine, &*world.backend, vec![mount], 0, 0.0, shared, &|_| None, &|_| None, &[]).unwrap();
+
+        let (mut color, mut depth) = (None, None);
+        for _ in 0..4 {
+            world.step();
+            rig.sample(&engine, &*world.backend, world.simulated_seconds, &SensorEnvironment::default(), &mut |_| true)
+                .unwrap();
+            let wait = wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(5)) };
+            engine.device().unwrap().poll(wait).unwrap();
+            rig.collect(0, &mut |_, r| {
+                if let SensorReading::Camera(frame) = r {
+                    if frame.channel == CAMERA_DEPTH {
+                        depth = Some(frame.depths());
+                    } else {
+                        color = Some(frame.colors());
+                    }
+                }
+                true
+            });
+        }
+        let color = color.expect("DOF color frame");
+        let depth = depth.expect("DOF depth frame");
+        let center = 12 * 32 + 16;
+        assert!((depth[center] - 4.5).abs() < 0.05, "center depth {}", depth[center]);
+        assert_ne!(color[center] & 0xff_ff_ff, 0);
     }
 }
