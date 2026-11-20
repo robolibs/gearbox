@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rungear"
+version = "0.1.0"
+description = "Gearbox peerbus shared-memory bridge to Rerun"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "rerun-sdk>=0.31",
+]
+
+[project.scripts]
+rungear = "rungear.cli:main"
+gearbox-rungear = "rungear.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
