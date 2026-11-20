@@ -38,6 +38,7 @@ fn copter_command_back(c: md::CopterCommand) -> CopterCommand {
         md::CopterCommand::Attitude { roll, pitch, yaw_rate, climb } => {
             CopterCommand::Attitude { roll, pitch, yaw_rate, climb }
         }
+        md::CopterCommand::Trajectory { .. } => CopterCommand::Off,
     }
 }
 
@@ -317,6 +318,7 @@ impl MollaBackend {
                 disturbance_time: l.disturbance_time,
                 attitude_frequency: l.attitude_frequency,
                 yaw_gain: l.yaw_gain,
+                ..md::CopterLimits::default()
             },
         };
         let id = {
