@@ -29,6 +29,7 @@ pub fn configure_plugins(group: PluginGroupBuilder) -> PluginGroupBuilder {
 }
 
 pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bool) {
+    app.insert_resource(bevy::render::error_handler::RenderErrorHandler(handle_render_error));
     app.insert_resource(viewer::overlays::WireframeAvailable(wireframe_supported));
     if wireframe_supported {
         app.add_plugins(bevy::pbr::wireframe::WireframePlugin::default());
@@ -165,4 +166,59 @@ fn projection_budget_from_env() -> usd_bevy::UsdProjectionBudget {
         std::time::Duration::from_millis(millis)
     };
     usd_bevy::UsdProjectionBudget(budget)
+}
+
+/// On Wayland + NVIDIA, resizing or switching workspaces while sensor compute
+/// and render readbacks are in flight can trigger wgpu's transient
+/// `ConfigureSurfaceError::GpuWaitTimeout` (classified as `Validation`). Ignore
+/// that transient timeout so mara reconfigures on the next frame instead of
+/// killing the simulator; all other render errors keep Bevy's default exit.
+fn is_transient_surface_configure_timeout(error: &bevy::render::error_handler::RenderError) -> bool {
+    error.ty == bevy::render::error_handler::ErrorType::Validation
+        && error.description.contains("Surface::configure")
+        && error.description.contains("Failed to wait for GPU to come idle")
+}
+
+fn handle_render_error(
+    error: &bevy::render::error_handler::RenderError,
+    main_world: &mut World,
+    _render_world: &mut World,
+) -> bevy::render::error_handler::RenderErrorPolicy {
+    if is_transient_surface_configure_timeout(error) {
+        warn!("transient wgpu Surface::configure GPU-idle timeout; continuing rendering");
+        return bevy::render::error_handler::RenderErrorPolicy::Ignore;
+    }
+    error!("Quitting the application due to {:?} RenderError: {}", error.ty, error.description);
+    main_world.write_message(AppExit::error());
+    bevy::render::error_handler::RenderErrorPolicy::StopRendering
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::render::error_handler::{ErrorType, RenderError};
+
+    #[test]
+    fn transient_surface_configure_timeout_is_ignored_while_real_errors_quit() {
+        let timeout = RenderError {
+            ty: ErrorType::Validation,
+            description: "In Surface::configure\n  Failed to wait for GPU to come idle before reconfiguring the Surface".into(),
+            source: None,
+        };
+        assert!(is_transient_surface_configure_timeout(&timeout));
+
+        let real_validation = RenderError {
+            ty: ErrorType::Validation,
+            description: "In Device::create_shader_module: invalid WGSL".into(),
+            source: None,
+        };
+        assert!(!is_transient_surface_configure_timeout(&real_validation));
+
+        let device_lost = RenderError {
+            ty: ErrorType::DeviceLost,
+            description: "In Surface::configure\n  Failed to wait for GPU to come idle".into(),
+            source: None,
+        };
+        assert!(!is_transient_surface_configure_timeout(&device_lost));
+    }
 }
