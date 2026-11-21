@@ -16,6 +16,14 @@ use crate::{
 
 /// USD files are addressed by absolute path, so the asset root is `/`.
 /// Ctrl-C, SIGTERM and SIGHUP end the app with an AppExit, a second one at once.
+///
+/// `PipelinedRenderingPlugin` is disabled because `mara` / `egui-wgpu` shares
+/// the `wgpu::Device` and calls `Surface::configure` on the main thread during
+/// `WindowEvent::Resized`. When a background Bevy render thread submits to the
+/// same queue concurrently, `wgpu-core`'s `Surface::configure` wait-for-empty-queue
+/// check aborts with `ConfigureSurfaceError::GpuWaitTimeout`, leaving the
+/// swapchain stuck at the previous size and triggering a `set_scissor_rect`
+/// validation error on the next frame.
 pub fn configure_plugins(group: PluginGroupBuilder) -> PluginGroupBuilder {
     // big_space propagates transforms in the stock plugin's place.
     group
@@ -25,6 +33,7 @@ pub fn configure_plugins(group: PluginGroupBuilder) -> PluginGroupBuilder {
             ..default()
         })
         .disable::<TransformPlugin>()
+        .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>()
         .enable::<bevy::app::TerminalCtrlCHandlerPlugin>()
 }
 

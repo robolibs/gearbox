@@ -153,7 +153,11 @@ fn spawn_camera(
         fov: job.spec.vfov,
         aspect_ratio: job.spec.width as f32 / job.spec.height as f32,
         near: 0.05,
-        far: job.spec.range_m.max(1.0),
+        // Keep the visual far plane out to the horizon so distant fields,
+        // hills and atmospheric haze match the viewer camera instead of
+        // clipping the world off at `range_m` (depth/recognition still honour
+        // `range_m` in Molla).
+        far: job.spec.range_m.max(20_000.0),
         ..default()
     });
     let clear_color = if weather.is_some() {
@@ -189,7 +193,16 @@ fn spawn_camera(
     ));
     let lean = job.spec.render == CameraRender::Optimized;
     match weather {
-        Some(weather) => bevy_weather::camera_look(&mut camera, weather, lean),
+        // `full` matches the viewer camera's look (4x MSAA for
+        // alpha-to-coverage grass/clumps, Bloom, HDR/AgX, fog, cloud shadows)
+        // while using `LeanSun` by default so offscreen sensors don't re-render
+        // 4x4096 directional shadow cascades every sample (`GEARBOX_SENSOR_SHADOWS=1`
+        // opts back in). `optimized` uses the lean shadowless, MSAA-off look.
+        Some(weather) if lean => bevy_weather::camera_look(&mut camera, weather, true),
+        Some(weather) => {
+            let shadows = std::env::var_os("GEARBOX_SENSOR_SHADOWS").is_some();
+            bevy_weather::sensor_camera_look(&mut camera, weather, shadows);
+        }
         None => {
             camera.insert(Msaa::Off);
         }
@@ -367,18 +380,22 @@ fn arm_spawned_cameras(
     }
 }
 
-/// Strips the 256-byte row padding of a texture readback.
-fn unpad_rows(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+/// Strips the 256-byte row padding of a texture readback, borrowing zero-copy
+/// when the row byte width is already 256-byte aligned (e.g. 1280px RGBA).
+fn unpad_rows(data: &[u8], width: u32, height: u32) -> Option<std::borrow::Cow<'_, [u8]>> {
     let row = width as usize * 4;
     let stride = row.div_ceil(256) * 256;
     if data.len() < stride * (height as usize - 1) + row {
         return None;
     }
+    if stride == row {
+        return Some(std::borrow::Cow::Borrowed(&data[..row * height as usize]));
+    }
     let mut pixels = Vec::with_capacity(row * height as usize);
     for y in 0..height as usize {
         pixels.extend_from_slice(&data[y * stride..y * stride + row]);
     }
-    Some(pixels)
+    Some(std::borrow::Cow::Owned(pixels))
 }
 
 fn publish_readback(

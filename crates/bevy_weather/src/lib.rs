@@ -8,7 +8,7 @@ mod daylight;
 mod sky;
 
 pub use calendar::{Planet, SolarCalendar};
-pub use sky::{WeatherOptOut, camera_look};
+pub use sky::{WeatherOptOut, camera_look, sensor_camera_look};
 
 /// Render layer of the cloud skybox planes. They are drawn from the clouds
 /// camera's own cloud image, so only that camera should include this layer.
