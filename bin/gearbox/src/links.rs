@@ -199,6 +199,13 @@ impl SensorKind {
         SENSOR_KINDS.iter().find(|(_, kind)| *kind == self).map_or("", |(name, _)| name)
     }
 
+    /// Comma-separated list of every accepted `gearbox:sensor:kind` token.
+    pub fn supported_list() -> String {
+        let mut names: Vec<&str> = SENSOR_KINDS.iter().map(|(name, _)| *name).collect();
+        names.insert(3, "range_finder");
+        names.join(", ")
+    }
+
     /// Kinds read from the IMU batch.
     pub fn uses_imu(self) -> bool {
         matches!(self, Self::Imu | Self::Accelerometer | Self::Gyro)
@@ -292,8 +299,89 @@ pub struct SensorSpec {
     pub aperture: f32,
     /// Radar minimum range (m).
     pub min_range_m: f32,
+    /// Radar minimum absolute radial speed (m/s).
+    pub min_radial_speed_mps: f32,
+    /// Radar carrier frequency (GHz).
+    pub frequency_ghz: f32,
+    /// Radar transmitted power (dBm).
+    pub tx_power_dbm: f32,
+    /// Whether radar drops occluded targets.
+    pub occlusion: bool,
+    /// Camera thin-lens entrance diameter (m); 0 means pinhole.
+    pub lens_diameter_m: f32,
+    /// Camera thin-lens focus distance (m).
+    pub focal_distance_m: f32,
+    /// Camera thin-lens aperture samples per pixel (1..=1024).
+    pub aperture_samples: u32,
     /// Radio channel; -1 hears every channel.
     pub channel: i32,
+}
+
+impl SensorSpec {
+    /// Default spec for `kind` (use `range_finder = true` for `kind = "range_finder"`).
+    pub fn defaults(kind: SensorKind, range_finder: bool) -> Self {
+        let radio = matches!(kind, SensorKind::Receiver | SensorKind::Emitter);
+        Self {
+            kind,
+            rate_hz: match kind {
+                SensorKind::Imu
+                | SensorKind::Accelerometer
+                | SensorKind::Gyro
+                | SensorKind::InertialUnit
+                | SensorKind::Position
+                | SensorKind::Touch => 100.0,
+                SensorKind::Lidar | SensorKind::Gps | SensorKind::Light => 10.0,
+                SensorKind::Camera => 5.0,
+                SensorKind::Compass | SensorKind::Distance | SensorKind::Radar => 20.0,
+                SensorKind::Receiver | SensorKind::Emitter => 50.0,
+                SensorKind::Climate => 1.0,
+            },
+            columns: 360,
+            rows: 16,
+            hfov: match kind {
+                SensorKind::Radar => 45f32.to_radians(),
+                _ => std::f32::consts::TAU,
+            },
+            vfov: match kind {
+                SensorKind::Camera => 60f32.to_radians(),
+                SensorKind::Radar => 10f32.to_radians(),
+                _ => 30f32.to_radians(),
+            },
+            range_m: match kind {
+                SensorKind::Distance => 10.0,
+                SensorKind::Radar => 50.0,
+                _ if radio => f32::INFINITY,
+                _ => 100.0,
+            },
+            width: 128,
+            height: 96,
+            render: if range_finder {
+                CameraRender::Geometry
+            } else {
+                CameraRender::Optimized
+            },
+            color: !range_finder,
+            depth: true,
+            recognition: false,
+            variant: match kind {
+                SensorKind::Distance => SensorVariant::Laser,
+                SensorKind::Touch => SensorVariant::Bumper,
+                _ if radio => SensorVariant::Radio,
+                _ => SensorVariant::Default,
+            },
+            rays: 1,
+            aperture: if radio { 90f32.to_radians() } else { 0.0 },
+            min_range_m: 1.0,
+            min_radial_speed_mps: 0.0,
+            frequency_ghz: 24.0,
+            tx_power_dbm: 1.0,
+            occlusion: true,
+            lens_diameter_m: 0.0,
+            focal_distance_m: 0.0,
+            aperture_samples: 1,
+            channel: 0,
+        }
+    }
 }
 
 /// Source of a camera link's colour image (`gearbox:sensor:render`). Depth
@@ -1211,11 +1299,62 @@ def Xform "robot" (
         assert_eq!((touch.variant, touch.rate_hz), (SensorVariant::Force3d, 100.0));
         let recognition = with(
             r#"token gearbox:sensor:kind = "camera"
-            bool gearbox:sensor:recognition = true"#,
+            bool gearbox:sensor:recognition = true
+            float gearbox:sensor:lens_diameter_m = 0.05
+            float gearbox:sensor:focal_distance_m = 4.0
+            int gearbox:sensor:aperture_samples = 8"#,
         );
         assert!(recognition.recognition);
+        assert_eq!((recognition.lens_diameter_m, recognition.focal_distance_m, recognition.aperture_samples), (0.05, 4.0, 8));
         let finder = with(r#"token gearbox:sensor:kind = "range_finder""#);
         assert_eq!((finder.kind, finder.color, finder.depth), (SensorKind::Camera, false, true));
+
+        let radar_full = with(
+            r#"token gearbox:sensor:kind = "radar"
+            float gearbox:sensor:min_radial_speed_mps = 0.5
+            float gearbox:sensor:frequency_ghz = 77
+            float gearbox:sensor:tx_power_dbm = 12
+            bool gearbox:sensor:occlusion = false"#,
+        );
+        assert_eq!(
+            (radar_full.min_radial_speed_mps, radar_full.frequency_ghz, radar_full.tx_power_dbm, radar_full.occlusion),
+            (0.5, 77.0, 12.0, false)
+        );
+
+        let bad_optics = CHASSIS_AND_WHEEL.replace(
+            r#"token gearbox:link:role = "sensor""#,
+            r#"token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "camera"
+            float gearbox:sensor:lens_diameter_m = 0.05
+            int gearbox:sensor:aperture_samples = 2048"#,
+        );
+        let tree = discover(&machine_with(&bad_optics, WHEEL_JOINT));
+        assert!(tree.errors.iter().any(|e| e.contains("focal_distance_m")), "{:?}", tree.errors);
+        assert!(tree.errors.iter().any(|e| e.contains("aperture_samples")), "{:?}", tree.errors);
+
+        let bad_radar = CHASSIS_AND_WHEEL.replace(
+            r#"token gearbox:link:role = "sensor""#,
+            r#"token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "radar"
+            float gearbox:sensor:frequency_ghz = 0
+            float gearbox:sensor:min_radial_speed_mps = -1"#,
+        );
+        let tree = discover(&machine_with(&bad_radar, WHEEL_JOINT));
+        assert!(tree.errors.iter().any(|e| e.contains("frequency_ghz")), "{:?}", tree.errors);
+        assert!(tree.errors.iter().any(|e| e.contains("min_radial_speed_mps")), "{:?}", tree.errors);
+
+        // Unknown kind error and unnamed sensor warning list all supported kinds.
+        let unknown = CHASSIS_AND_WHEEL.replace(
+            r#"token gearbox:link:role = "sensor""#,
+            r#"token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "sextant""#,
+        );
+        let tree = discover(&machine_with(&unknown, WHEEL_JOINT));
+        assert!(
+            tree.errors.iter().any(|e| e.contains("camera") && e.contains("radar") && e.contains("climate")),
+            "{:?}",
+            tree.errors
+        );
     }
 
     #[test]
@@ -1633,7 +1772,8 @@ fn read_sensor(
             Some(kind) => kind,
             None => {
                 errors.push(format!(
-                    "{prim}: unknown gearbox:sensor:kind `{token}` (imu, lidar)"
+                    "{prim}: unknown gearbox:sensor:kind `{token}` ({})",
+                    SensorKind::supported_list()
                 ));
                 return None;
             }
@@ -1642,7 +1782,8 @@ fn read_sensor(
             Some(kind) => kind,
             None => {
                 warnings.push(format!(
-                    "{prim}: sensor link `{name}` names no supported sensor; author gearbox:sensor:kind (imu, lidar) to simulate it"
+                    "{prim}: sensor link `{name}` names no supported sensor; author gearbox:sensor:kind ({}) to simulate it",
+                    SensorKind::supported_list()
                 ));
                 return None;
             }
@@ -1650,60 +1791,7 @@ fn read_sensor(
     };
     let range_finder = read_token(stage, prim, "gearbox:sensor:kind")
         .map_or(name.starts_with("range_finder"), |token| token == "range_finder");
-    let radio = matches!(kind, SensorKind::Receiver | SensorKind::Emitter);
-    let mut spec = SensorSpec {
-        kind,
-        rate_hz: match kind {
-            SensorKind::Imu
-            | SensorKind::Accelerometer
-            | SensorKind::Gyro
-            | SensorKind::InertialUnit
-            | SensorKind::Position
-            | SensorKind::Touch => 100.0,
-            SensorKind::Lidar | SensorKind::Gps | SensorKind::Light => 10.0,
-            SensorKind::Camera => 5.0,
-            SensorKind::Compass | SensorKind::Distance | SensorKind::Radar => 20.0,
-            SensorKind::Receiver | SensorKind::Emitter => 50.0,
-            SensorKind::Climate => 1.0,
-        },
-        columns: 360,
-        rows: 16,
-        hfov: match kind {
-            SensorKind::Radar => 45f32.to_radians(),
-            _ => std::f32::consts::TAU,
-        },
-        vfov: match kind {
-            SensorKind::Camera => 60f32.to_radians(),
-            SensorKind::Radar => 10f32.to_radians(),
-            _ => 30f32.to_radians(),
-        },
-        range_m: match kind {
-            SensorKind::Distance => 10.0,
-            SensorKind::Radar => 50.0,
-            _ if radio => f32::INFINITY,
-            _ => 100.0,
-        },
-        width: 128,
-        height: 96,
-        render: if range_finder {
-            CameraRender::Geometry
-        } else {
-            CameraRender::Optimized
-        },
-        color: !range_finder,
-        depth: true,
-        recognition: false,
-        variant: match kind {
-            SensorKind::Distance => SensorVariant::Laser,
-            SensorKind::Touch => SensorVariant::Bumper,
-            _ if radio => SensorVariant::Radio,
-            _ => SensorVariant::Default,
-        },
-        rays: 1,
-        aperture: if radio { 90f32.to_radians() } else { 0.0 },
-        min_range_m: 1.0,
-        channel: 0,
-    };
+    let mut spec = SensorSpec::defaults(kind, range_finder);
     fn bad(errors: &mut Vec<String>, prim: &SdfPath, what: &str, value: f32) {
         errors.push(format!(
             "{prim}: gearbox:sensor:{what} = {value} is out of range"
@@ -1806,6 +1894,30 @@ fn read_sensor(
         if let Some(recognition) = read_bool(stage, prim, "gearbox:sensor:recognition") {
             spec.recognition = recognition;
         }
+        if let Some(lens) = read_float(stage, prim, "gearbox:sensor:lens_diameter_m") {
+            if lens.is_finite() && lens >= 0.0 {
+                spec.lens_diameter_m = lens;
+            } else {
+                bad(errors, prim, "lens_diameter_m", lens);
+            }
+        }
+        if let Some(focus) = read_float(stage, prim, "gearbox:sensor:focal_distance_m") {
+            if focus.is_finite() && focus >= 0.0 {
+                spec.focal_distance_m = focus;
+            } else {
+                bad(errors, prim, "focal_distance_m", focus);
+            }
+        }
+        if let Some(samples) = read_float(stage, prim, "gearbox:sensor:aperture_samples") {
+            if (1.0..=1024.0).contains(&samples) && samples.fract() == 0.0 {
+                spec.aperture_samples = samples as u32;
+            } else {
+                bad(errors, prim, "aperture_samples", samples);
+            }
+        }
+        if spec.lens_diameter_m > 0.0 && spec.focal_distance_m <= 0.0 {
+            bad(errors, prim, "focal_distance_m", spec.focal_distance_m);
+        }
     }
     read_generic_sensor(stage, prim, &mut spec, errors);
     Some(spec)
@@ -1878,6 +1990,30 @@ fn read_generic_sensor(
             } else {
                 bad(errors, "min_range_m", min);
             }
+        }
+        if let Some(speed) = read_float(stage, prim, "gearbox:sensor:min_radial_speed_mps") {
+            if speed.is_finite() && speed >= 0.0 {
+                spec.min_radial_speed_mps = speed;
+            } else {
+                bad(errors, "min_radial_speed_mps", speed);
+            }
+        }
+        if let Some(freq) = read_float(stage, prim, "gearbox:sensor:frequency_ghz") {
+            if freq.is_finite() && freq > 0.0 {
+                spec.frequency_ghz = freq;
+            } else {
+                bad(errors, "frequency_ghz", freq);
+            }
+        }
+        if let Some(power) = read_float(stage, prim, "gearbox:sensor:tx_power_dbm") {
+            if power.is_finite() {
+                spec.tx_power_dbm = power;
+            } else {
+                bad(errors, "tx_power_dbm", power);
+            }
+        }
+        if let Some(occlusion) = read_bool(stage, prim, "gearbox:sensor:occlusion") {
+            spec.occlusion = occlusion;
         }
     }
     if radio && let Some(channel) = read_float(stage, prim, "gearbox:sensor:channel") {

@@ -438,7 +438,7 @@ pub fn shm_limits() -> agentio::LocalConfig {
     agentio::LocalConfig {
         max_publishers: 24,
         max_subscribers: 16,
-        subscriber_buffer: 512,
+        subscriber_buffer: 1024,
         history_depth: 1,
         max_payload_bytes: MAX_PAYLOAD_BYTES,
     }

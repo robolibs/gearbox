@@ -2,18 +2,26 @@
 //! per candidate and lists the ones that may show; the chunk then draws only
 //! those, indirectly, through its usual vertex shader.
 
-use super::render::{FieldBindGroups, NoVegetation, VegetationChunk, VegetationOffset, VegetationPipeline};
+use super::render::{
+    FieldBindGroups, NoVegetation, VegetationChunk, VegetationOffset, VegetationPipeline,
+    chunk_in_view, view_frustum,
+};
+use bevy::core_pipeline::core_3d::Transparent3d;
 use bevy::core_pipeline::schedule::{Core3d, Core3dSystems};
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
+use bevy::render::camera::ExtractedCamera;
 use bevy::render::globals::{GlobalsBuffer, GlobalsUniform};
 use bevy::render::mesh::allocator::MeshAllocator;
 use bevy::render::mesh::{RenderMesh, RenderMeshBufferInfo};
 use bevy::render::render_asset::RenderAssets;
+use bevy::render::render_phase::ViewSortedRenderPhases;
 use bevy::render::render_resource::binding_types::{storage_buffer_sized, uniform_buffer};
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
-use bevy::render::view::{ExtractedView, ViewUniform, ViewUniformOffset, ViewUniforms};
+use bevy::render::view::{
+    ExtractedView, RetainedViewEntity, ViewUniform, ViewUniformOffset, ViewUniforms,
+};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use std::num::NonZeroU64;
 
@@ -21,6 +29,9 @@ const WORKGROUP: u32 = 64;
 
 /// Bytes of one chunk's indirect arguments as the sieve writes them.
 const ARGS_BYTES: u64 = 20;
+
+/// Frames an inactive view's sieve GPU buffers stay warm before eviction.
+const VIEW_BUFFER_TTL_FRAMES: u32 = 180;
 
 pub struct SievePlugin;
 
@@ -65,6 +76,10 @@ struct SieveJob {
     field_offset: u32,
     dispatch_offset: u32,
     instances: u32,
+    corner: Vec2,
+    size: f32,
+    height_span: Vec2,
+    fade_end: f32,
     slot: SieveSlot,
     /// Index count, first index and base vertex of the chunk's mesh.
     mesh: [u32; 3],
@@ -86,22 +101,23 @@ struct SieveView {
     view_group: BindGroup,
     sieve_group: BindGroup,
     draw_group: BindGroup,
+    idle_frames: u32,
 }
 
 #[derive(Resource, Default)]
 pub(crate) struct SieveViews {
-    views: HashMap<Entity, SieveView>,
+    views: HashMap<RetainedViewEntity, SieveView>,
     slots: HashMap<Entity, SieveSlot>,
 }
 
 impl SieveViews {
     /// The view's survivor group and the chunk's slot in it.
-    pub(crate) fn slot(&self, view: Entity, chunk: Entity) -> Option<(&BindGroup, SieveSlot)> {
+    pub(crate) fn slot(&self, view: RetainedViewEntity, chunk: Entity) -> Option<(&BindGroup, SieveSlot)> {
         Some((&self.views.get(&view)?.draw_group, *self.slots.get(&chunk)?))
     }
 
     /// The view's arguments buffer and the chunk's offset in it.
-    pub(crate) fn args(&self, view: Entity, chunk: Entity) -> Option<(&Buffer, u64)> {
+    pub(crate) fn args(&self, view: RetainedViewEntity, chunk: Entity) -> Option<(&Buffer, u64)> {
         Some((&self.views.get(&view)?.args, self.slots.get(&chunk)?.args as u64))
     }
 }
@@ -217,6 +233,10 @@ fn prepare_sieve_jobs(
             field_offset: offset.0,
             dispatch_offset,
             instances: chunk.instances,
+            corner: chunk.corner,
+            size: chunk.size,
+            height_span: chunk.height_span,
+            fade_end: chunk.fade_end,
             slot,
             mesh: [*count, indices.range.start, vertices.range.start],
         });
@@ -231,7 +251,11 @@ fn prepare_sieve_jobs(
 /// jobs, the arguments reset to no instances, and the bind groups over them.
 #[allow(clippy::too_many_arguments)]
 fn prepare_sieve_views(
-    views: Query<Entity, (With<ExtractedView>, With<ViewUniformOffset>, Without<NoVegetation>)>,
+    views: Query<
+        &ExtractedView,
+        (With<ExtractedCamera>, With<ViewUniformOffset>, Without<NoVegetation>),
+    >,
+    phases: Res<ViewSortedRenderPhases<Transparent3d>>,
     jobs: Res<SieveJobs>,
     mut state: ResMut<SieveViews>,
     pipelines: Res<SievePipelines>,
@@ -241,8 +265,20 @@ fn prepare_sieve_views(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
 ) {
-    let live: HashSet<Entity> = views.iter().collect();
-    state.views.retain(|view, _| live.contains(view));
+    let live: HashSet<RetainedViewEntity> = views
+        .iter()
+        .map(|extracted| extracted.retained_view_entity)
+        .filter(|id| phases.contains_key(id))
+        .collect();
+    state.views.retain(|view, known| {
+        if live.contains(view) {
+            known.idle_frames = 0;
+            true
+        } else {
+            known.idle_frames += 1;
+            known.idle_frames <= VIEW_BUFFER_TTL_FRAMES
+        }
+    });
     if jobs.jobs.is_empty() {
         return;
     }
@@ -258,7 +294,11 @@ fn prepare_sieve_views(
         let at = (job.slot.args / 4) as usize;
         reset[at..at + 5].copy_from_slice(&[job.mesh[0], 0, job.mesh[1], job.mesh[2], 0]);
     }
-    for view in &views {
+    for extracted in &views {
+        let view = extracted.retained_view_entity;
+        if !phases.contains_key(&view) {
+            continue;
+        }
         let fits = state.views.get(&view).is_some_and(|known| {
             known.survivors.size() >= jobs.survivor_bytes && known.args.size() >= jobs.args_bytes
         });
@@ -300,13 +340,23 @@ fn prepare_sieve_views(
             &pipeline_cache.get_bind_group_layout(&pipelines.draw_layout),
             &BindGroupEntries::single(region),
         );
-        state.views.insert(view, SieveView { survivors, args, view_group, sieve_group, draw_group });
+        state.views.insert(
+            view,
+            SieveView {
+                survivors,
+                args,
+                view_group,
+                sieve_group,
+                draw_group,
+                idle_frames: 0,
+            },
+        );
     }
 }
 
-/// Sieves every chunk of the frame for the view being drawn.
+/// Sieves every visible chunk of the frame for the view being drawn.
 fn sieve_chunks(
-    view: ViewQuery<&ViewUniformOffset>,
+    view: ViewQuery<(&ExtractedView, &ViewUniformOffset)>,
     state: Res<SieveViews>,
     jobs: Res<SieveJobs>,
     pipelines: Res<SievePipelines>,
@@ -314,12 +364,30 @@ fn sieve_chunks(
     fields: Option<Res<FieldBindGroups>>,
     mut ctx: RenderContext,
 ) {
-    let entity = view.entity();
-    let view_offset = view.into_inner();
-    let (Some(target), Some(fields)) = (state.views.get(&entity), fields) else {
+    let (extracted, view_offset) = view.into_inner();
+    let (Some(target), Some(fields)) = (state.views.get(&extracted.retained_view_entity), fields) else {
         return;
     };
     if jobs.jobs.is_empty() {
+        return;
+    }
+    let frustum = view_frustum(extracted);
+    let visible: Vec<&SieveJob> = jobs
+        .jobs
+        .iter()
+        .filter(|job| {
+            chunk_in_view(
+                job.corner,
+                job.size,
+                job.height_span,
+                job.fade_end,
+                None,
+                extracted,
+                &frustum,
+            )
+        })
+        .collect();
+    if visible.is_empty() {
         return;
     }
     let mut pass = ctx.command_encoder().begin_compute_pass(&ComputePassDescriptor {
@@ -328,7 +396,7 @@ fn sieve_chunks(
     });
     pass.set_bind_group(0, &target.view_group, &[view_offset.offset]);
     pass.set_bind_group(2, &fields.empty, &[]);
-    for job in &jobs.jobs {
+    for job in visible {
         let (Some(pipeline), Some(field)) = (
             pipelines.pipelines.get(&job.shader.id()).and_then(|id| pipeline_cache.get_compute_pipeline(*id)),
             fields.fields.get(&job.field),

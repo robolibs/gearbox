@@ -20,6 +20,7 @@ pub(crate) fn project(app: &mut App, stage: &openusd::usd::Stage) -> Entity {
             app.world_mut().entity_mut(entity).insert(Name::new(path.to_string()));
             attach::attach_physics_to_entity(app.world_mut(), entity, &mut pending, &meta);
             attach::attach_joint_softness(app.world_mut(), entity, stage, path);
+            attach::attach_sensor_metadata(app.world_mut(), entity, stage, path);
         }
     }
     let paths = prims.iter().map(|(path, entity)| (path.to_string(), entity)).collect();

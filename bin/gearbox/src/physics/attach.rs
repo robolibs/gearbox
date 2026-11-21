@@ -471,6 +471,30 @@ pub fn attach_joint_softness(world: &mut World, entity: Entity, stage: &Stage, p
     world.entity_mut(entity).insert(joint);
 }
 
+/// Attaches authored sensor target metadata (`gearbox:radar:crossSection`,
+/// `gearbox:value:radar_cross_section`, `gearbox:sensor:label`) to `entity`.
+pub fn attach_sensor_metadata(world: &mut World, entity: Entity, stage: &Stage, path: &str) {
+    let Ok(prim) = openusd::sdf::path(path) else {
+        return;
+    };
+    let rcs = crate::controller::read_float(stage, &prim, "gearbox:radar:crossSection")
+        .or_else(|| crate::controller::read_float(stage, &prim, "gearbox:value:radar_cross_section"))
+        .map(f64::from);
+    if let Some(rcs) = rcs.filter(|v| v.is_finite() && *v >= 0.0) {
+        world
+            .entity_mut(entity)
+            .insert(crate::sensors::RadarCrossSection(rcs));
+    }
+    if world.get::<crate::sensors::SensorLabel>(entity).is_none()
+        && let Some(label) = crate::controller::read_token(stage, &prim, "gearbox:sensor:label")
+        && !label.is_empty()
+    {
+        world
+            .entity_mut(entity)
+            .insert(crate::sensors::SensorLabel(label));
+    }
+}
+
 /// A D6 axis limit in SI; an unauthored side is open.
 fn convert_limit(l: &up::UsdLimit, meta: &StageMeta) -> UsdJointLimit {
     let dof = dof(&l.dof).unwrap_or_default();

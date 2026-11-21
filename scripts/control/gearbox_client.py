@@ -449,6 +449,547 @@ class GreenhouseAction:
     props: bytes = b""
 
 
+# ─── Simulated sensor wire types (mirror crates/gearbox-api/src/wire/machine.rs) ─
+
+CAMERA_COLOR = 0
+CAMERA_DEPTH = 1
+
+MEASUREMENT_KIND = {
+    "accelerometer": 1, "gyro": 2, "inertial_unit": 3, "compass": 4, "gps": 5,
+    "distance": 6, "light": 7, "position": 8, "radar": 9, "touch": 10,
+    "receiver": 11, "recognition": 12, "motor": 13, "propeller": 14, "belt": 15,
+    "connector": 16, "copter": 17, "drag": 18, "climate": 19,
+}
+MEASUREMENT_NAME = {v: k for k, v in MEASUREMENT_KIND.items()}
+MEASUREMENT_WIDTH = {
+    1: 3, 2: 3, 3: 7, 4: 4, 5: 10, 6: 2, 7: 5, 8: 2, 9: 5, 10: 6,
+    11: 5, 12: 12, 13: 8, 14: 4, 15: 2, 16: 5, 17: 9, 18: 9, 19: 5,
+}
+
+
+@_pod(
+    "gearbox.tf.v1",
+    "<QQd10I",
+    (
+        "generation", "tick", "sim_time_s",
+        "translation_offset", "translation_len",
+        "rotation_offset", "rotation_len",
+        "parents_offset", "parents_len",
+        "children_offset", "children_len",
+        "props_offset", "props_len",
+    ),
+    payload="payload",
+)
+class Tf:
+    generation: int = 0
+    tick: int = 0
+    sim_time_s: float = 0.0
+    translation_offset: int = 0
+    translation_len: int = 0
+    rotation_offset: int = 0
+    rotation_len: int = 0
+    parents_offset: int = 0
+    parents_len: int = 0
+    children_offset: int = 0
+    children_len: int = 0
+    props_offset: int = 0
+    props_len: int = 0
+    payload: bytes = b""
+
+    def section(self, name: str) -> bytes:
+        at = getattr(self, f"{name}_offset")
+        return self.payload[at : at + getattr(self, f"{name}_len")]
+
+    @property
+    def props(self) -> dict[str, str]:
+        return unpack_map(self.section("props"))
+
+    def edges(self) -> list[dict]:
+        parents = [s for s in self.section("parents").decode("utf-8", errors="replace").splitlines() if s]
+        children = [s for s in self.section("children").decode("utf-8", errors="replace").splitlines() if s]
+        tr_raw = self.section("translation")
+        rot_raw = self.section("rotation")
+        n = min(len(parents), len(children), len(tr_raw) // 24, len(rot_raw) // 32)
+        if n == 0:
+            return []
+        tr = struct.unpack(f"<{n * 3}d", tr_raw[: n * 24])
+        rot = struct.unpack(f"<{n * 4}d", rot_raw[: n * 32])
+        out = []
+        for i in range(n):
+            out.append({
+                "parent": parents[i],
+                "child": children[i],
+                "x": tr[3 * i], "y": tr[3 * i + 1], "z": tr[3 * i + 2],
+                "qw": rot[4 * i], "qx": rot[4 * i + 1], "qy": rot[4 * i + 2], "qz": rot[4 * i + 3],
+            })
+        return out
+
+
+@_pod("datapod.imu.v1", "<10d", ("wx", "wy", "wz", "ax", "ay", "az", "qw", "qx", "qy", "qz"))
+class Imu:
+    wx: float = 0.0
+    wy: float = 0.0
+    wz: float = 0.0
+    ax: float = 0.0
+    ay: float = 0.0
+    az: float = 0.0
+    qw: float = 1.0
+    qx: float = 0.0
+    qy: float = 0.0
+    qz: float = 0.0
+
+
+@_pod(
+    "gearbox.lidar_scan.v1",
+    "<6d8I6I",
+    (
+        "sim_time_s", "theta_min", "theta_max", "phi_min", "phi_max", "max_range_m",
+        "link_index", "rows", "cols", "pulse_offset", "pulse_count", "hits", "stamp_ms", "sample",
+        "ranges_offset", "ranges_len", "points_offset", "points_len", "props_offset", "props_len",
+    ),
+    payload="payload",
+)
+class LidarScan:
+    sim_time_s: float = 0.0
+    theta_min: float = 0.0
+    theta_max: float = 0.0
+    phi_min: float = 0.0
+    phi_max: float = 0.0
+    max_range_m: float = 0.0
+    link_index: int = 0
+    rows: int = 0
+    cols: int = 0
+    pulse_offset: int = 0
+    pulse_count: int = 0
+    hits: int = 0
+    stamp_ms: int = 0
+    sample: int = 0
+    ranges_offset: int = 0
+    ranges_len: int = 0
+    points_offset: int = 0
+    points_len: int = 0
+    props_offset: int = 0
+    props_len: int = 0
+    payload: bytes = b""
+
+    def section(self, name: str) -> bytes:
+        at = getattr(self, f"{name}_offset")
+        return self.payload[at : at + getattr(self, f"{name}_len")]
+
+    @property
+    def props(self) -> dict[str, str]:
+        return unpack_map(self.section("props"))
+
+    @property
+    def is_last(self) -> bool:
+        return self.pulse_offset + self.pulse_count >= self.rows * self.cols
+
+
+@_pod(
+    "gearbox.camera_frame.v1",
+    "<3d8I4I",
+    (
+        "sim_time_s", "fov_y_rad", "max_range_m",
+        "link_index", "width", "height", "row_offset", "rows", "channel", "stamp_ms", "sample",
+        "data_offset", "data_len", "props_offset", "props_len",
+    ),
+    payload="payload",
+)
+class CameraFrame:
+    sim_time_s: float = 0.0
+    fov_y_rad: float = 0.0
+    max_range_m: float = 0.0
+    link_index: int = 0
+    width: int = 0
+    height: int = 0
+    row_offset: int = 0
+    rows: int = 0
+    channel: int = 0
+    stamp_ms: int = 0
+    sample: int = 0
+    data_offset: int = 0
+    data_len: int = 0
+    props_offset: int = 0
+    props_len: int = 0
+    payload: bytes = b""
+
+    def section(self, name: str) -> bytes:
+        at = getattr(self, f"{name}_offset")
+        return self.payload[at : at + getattr(self, f"{name}_len")]
+
+    @property
+    def props(self) -> dict[str, str]:
+        return unpack_map(self.section("props"))
+
+    @property
+    def is_last(self) -> bool:
+        return self.row_offset + self.rows >= self.height
+
+
+@_pod(
+    "gearbox.measurement.v1",
+    "<d6I6I",
+    (
+        "sim_time_s", "link_index", "kind", "stamp_ms", "sample", "count", "_pad",
+        "values_offset", "values_len", "data_offset", "data_len", "props_offset", "props_len",
+    ),
+    payload="payload",
+)
+class Measurement:
+    sim_time_s: float = 0.0
+    link_index: int = 0
+    kind: int = 0
+    stamp_ms: int = 0
+    sample: int = 0
+    count: int = 0
+    _pad: int = 0
+    values_offset: int = 0
+    values_len: int = 0
+    data_offset: int = 0
+    data_len: int = 0
+    props_offset: int = 0
+    props_len: int = 0
+    payload: bytes = b""
+
+    def section(self, name: str) -> bytes:
+        at = getattr(self, f"{name}_offset")
+        return self.payload[at : at + getattr(self, f"{name}_len")]
+
+    @property
+    def props(self) -> dict[str, str]:
+        return unpack_map(self.section("props"))
+
+    @property
+    def kind_name(self) -> str:
+        return MEASUREMENT_NAME.get(self.kind, f"unknown({self.kind})")
+
+    def values_list(self) -> list[float]:
+        raw = self.section("values")
+        n = len(raw) // 8
+        return list(struct.unpack(f"<{n}d", raw[: n * 8])) if n else []
+
+    def records(self) -> list[list[float]]:
+        vals = self.values_list()
+        w = MEASUREMENT_WIDTH.get(self.kind, 0)
+        if w <= 0:
+            return [vals] if vals else []
+        n = min(self.count, len(vals) // w) if self.count else len(vals) // w
+        return [vals[i * w : (i + 1) * w] for i in range(n)]
+
+
+@dataclass
+class LidarSweep:
+    """Reassembled multi-chunk LiDAR sweep from `/machines/<id>/sensors/<link>`."""
+
+    link: str
+    sim_time_s: float
+    sample: int
+    rows: int
+    cols: int
+    hits: int
+    max_range_m: float
+    theta_min: float
+    theta_max: float
+    phi_min: float
+    phi_max: float
+    ranges_bytes: bytes
+    points_bytes: bytes
+    props: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class CameraImage:
+    """Reassembled multi-band camera frame from `/machines/<id>/sensors/<link>`."""
+
+    link: str
+    sim_time_s: float
+    sample: int
+    width: int
+    height: int
+    channel: int
+    fov_y_rad: float
+    max_range_m: float
+    data: bytes
+    props: dict[str, str] = field(default_factory=dict)
+
+
+_CAM_HEADER = struct.Struct("<3d12I")
+_CAM_HEADER_SIZE = _CAM_HEADER.size
+_LIDAR_HEADER = struct.Struct("<6d14I")
+_LIDAR_HEADER_SIZE = _LIDAR_HEADER.size
+
+
+class SensorStream:
+    """Peerbus subscriber for one simulated sensor link (`/machines/<id>/sensors/<link>`).
+
+    Demultiplexes `Imu`, `LidarScan`, `CameraFrame`, and `Measurement` messages by
+    datapod `type_hash`, and reassembles chunked LiDAR sweeps and camera frames.
+    """
+
+    def __init__(self, gb: "Gearbox", peer: str, topic: str, link: str):
+        self.topic = topic
+        self.link = link
+        self._sub = gb.subscribe(peer, topic)
+        self._lidar_sample: int | None = None
+        self._lidar_ranges = bytearray()
+        self._lidar_points = bytearray()
+        self._lidar_hits = 0
+        self._lidar_received = 0
+        self._cam_bufs: dict[int, tuple[int, int, int, bytearray, int]] = {}
+
+    def close(self) -> None:
+        self._sub = None
+
+    def drain(self, limit: int = 256) -> list[tuple[str, object]]:
+        """Pull all pending samples from shared memory, returning `(kind, item)` tuples.
+
+        `kind` is one of `"imu"`, `"lidar"`, `"camera"`, `"measurement"`.
+        """
+        sub = self._sub
+        if sub is None:
+            return []
+        out: list[tuple[str, object]] = []
+        take_view = getattr(sub, "take_view", None)
+        imu_hash = Imu.TYPE_HASH
+        meas_hash = Measurement.TYPE_HASH
+        lidar_hash = LidarScan.TYPE_HASH
+        cam_hash = CameraFrame.TYPE_HASH
+        if take_view is not None:
+            for _ in range(limit):
+                try:
+                    view = take_view()
+                except RuntimeError as err:
+                    if "lagged" in str(err):
+                        continue
+                    raise
+                if view is None:
+                    break
+                th = view.type_hash
+                if th == cam_hash:
+                    img = self._push_camera_wire(view.wire_view())
+                    if img is not None:
+                        out.append(("camera", img))
+                elif th == lidar_hash:
+                    sweep = self._push_lidar_wire(view.wire_view())
+                    if sweep is not None:
+                        out.append(("lidar", sweep))
+                elif th == imu_hash:
+                    out.append(("imu", Imu.from_wire_message(th, bytes(view.wire_view()))))
+                elif th == meas_hash:
+                    out.append(("measurement", Measurement.from_wire_message(th, bytes(view.wire_view()))))
+            return out
+        for _ in range(limit):
+            try:
+                msg = sub.take_message()
+            except RuntimeError as err:
+                if "lagged" in str(err):
+                    continue
+                raise
+            if msg is None:
+                break
+            th = msg.type_hash
+            if th == imu_hash:
+                out.append(("imu", msg.decode(Imu)))
+            elif th == meas_hash:
+                out.append(("measurement", msg.decode(Measurement)))
+            elif th == lidar_hash:
+                sweep = self._push_lidar(msg.decode(LidarScan))
+                if sweep is not None:
+                    out.append(("lidar", sweep))
+            elif th == cam_hash:
+                img = self._push_camera(msg.decode(CameraFrame))
+                if img is not None:
+                    out.append(("camera", img))
+        return out
+
+    def _push_lidar_wire(self, wire) -> LidarSweep | None:
+        mv = memoryview(wire)
+        if len(mv) < _LIDAR_HEADER_SIZE:
+            return None
+        (
+            sim_time_s, theta_min, theta_max, phi_min, phi_max, max_range_m,
+            _link_index, rows, cols, off, cnt, hits, _stamp_ms, sample,
+            r_off, r_len, p_off, p_len, props_off, props_len,
+        ) = _LIDAR_HEADER.unpack_from(mv, 0)
+        total = rows * cols
+        if total == 0:
+            return None
+        if self._lidar_sample != sample or len(self._lidar_ranges) != total * 4:
+            self._lidar_sample = sample
+            self._lidar_ranges = bytearray(total * 4)
+            self._lidar_points = bytearray(total * 12)
+            self._lidar_hits = 0
+            self._lidar_received = 0
+        if off + cnt <= total:
+            pbase = _LIDAR_HEADER_SIZE
+            if r_len >= cnt * 4:
+                self._lidar_ranges[off * 4 : (off + cnt) * 4] = mv[pbase + r_off : pbase + r_off + cnt * 4]
+            if p_len >= cnt * 12:
+                self._lidar_points[off * 12 : (off + cnt) * 12] = mv[pbase + p_off : pbase + p_off + cnt * 12]
+            self._lidar_hits += hits
+            self._lidar_received += cnt
+        if off + cnt >= total:
+            complete = self._lidar_received == total
+            if complete:
+                pbase = _LIDAR_HEADER_SIZE
+                props = (
+                    unpack_map(bytes(mv[pbase + props_off : pbase + props_off + props_len]))
+                    if props_len > 0
+                    else {}
+                )
+                sweep = LidarSweep(
+                    link=self.link,
+                    sim_time_s=sim_time_s,
+                    sample=sample,
+                    rows=rows,
+                    cols=cols,
+                    hits=self._lidar_hits,
+                    max_range_m=max_range_m,
+                    theta_min=theta_min,
+                    theta_max=theta_max,
+                    phi_min=phi_min,
+                    phi_max=phi_max,
+                    ranges_bytes=bytes(self._lidar_ranges),
+                    points_bytes=bytes(self._lidar_points),
+                    props=props,
+                )
+            else:
+                sweep = None
+            self._lidar_sample = None
+            return sweep
+        return None
+
+    def _push_camera_wire(self, wire) -> CameraImage | None:
+        mv = memoryview(wire)
+        if len(mv) < _CAM_HEADER_SIZE:
+            return None
+        (
+            sim_time_s, fov_y_rad, max_range_m,
+            _link_index, w, h, row_offset, rows, channel, _stamp_ms, sample,
+            data_off, data_len, props_off, props_len,
+        ) = _CAM_HEADER.unpack_from(mv, 0)
+        if w == 0 or h == 0:
+            return None
+        row_bytes = w * 4
+        entry = self._cam_bufs.get(channel)
+        if entry is None or entry[0] != sample or entry[1] != w or entry[2] != h:
+            buf = bytearray(h * row_bytes)
+            received = 0
+        else:
+            _, _, _, buf, received = entry
+        start = row_offset * row_bytes
+        end = min((row_offset + rows) * row_bytes, len(buf))
+        n = min(end - start, data_len)
+        if n > 0:
+            pbase = _CAM_HEADER_SIZE + data_off
+            buf[start : start + n] = mv[pbase : pbase + n]
+            received += rows
+        self._cam_bufs[channel] = (sample, w, h, buf, received)
+        if row_offset + rows >= h:
+            self._cam_bufs.pop(channel, None)
+            if received < h:
+                return None
+            pbase = _CAM_HEADER_SIZE + props_off
+            props = unpack_map(bytes(mv[pbase : pbase + props_len])) if props_len > 0 else {}
+            return CameraImage(
+                link=self.link,
+                sim_time_s=sim_time_s,
+                sample=sample,
+                width=w,
+                height=h,
+                channel=channel,
+                fov_y_rad=fov_y_rad,
+                max_range_m=max_range_m,
+                data=bytes(buf),
+                props=props,
+            )
+        return None
+
+    def _push_lidar(self, chunk: LidarScan) -> LidarSweep | None:
+        total = chunk.rows * chunk.cols
+        if total == 0:
+            return None
+        if self._lidar_sample != chunk.sample or len(self._lidar_ranges) != total * 4:
+            self._lidar_sample = chunk.sample
+            self._lidar_ranges = bytearray(total * 4)
+            self._lidar_points = bytearray(total * 12)
+            self._lidar_hits = 0
+            self._lidar_received = 0
+        r_raw = chunk.section("ranges")
+        p_raw = chunk.section("points")
+        off = chunk.pulse_offset
+        cnt = chunk.pulse_count
+        if off + cnt <= total:
+            if len(r_raw) >= cnt * 4:
+                self._lidar_ranges[off * 4 : (off + cnt) * 4] = r_raw[: cnt * 4]
+            if len(p_raw) >= cnt * 12:
+                self._lidar_points[off * 12 : (off + cnt) * 12] = p_raw[: cnt * 12]
+            self._lidar_hits += chunk.hits
+            self._lidar_received += cnt
+        if chunk.is_last:
+            complete = self._lidar_received == total
+            sweep = (
+                LidarSweep(
+                    link=self.link,
+                    sim_time_s=chunk.sim_time_s,
+                    sample=chunk.sample,
+                    rows=chunk.rows,
+                    cols=chunk.cols,
+                    hits=self._lidar_hits,
+                    max_range_m=chunk.max_range_m,
+                    theta_min=chunk.theta_min,
+                    theta_max=chunk.theta_max,
+                    phi_min=chunk.phi_min,
+                    phi_max=chunk.phi_max,
+                    ranges_bytes=bytes(self._lidar_ranges),
+                    points_bytes=bytes(self._lidar_points),
+                    props=chunk.props,
+                )
+                if complete
+                else None
+            )
+            self._lidar_sample = None
+            return sweep
+        return None
+
+    def _push_camera(self, chunk: CameraFrame) -> CameraImage | None:
+        w, h = chunk.width, chunk.height
+        if w == 0 or h == 0:
+            return None
+        row_bytes = w * 4
+        entry = self._cam_bufs.get(chunk.channel)
+        if entry is None or entry[0] != chunk.sample or entry[1] != w or entry[2] != h:
+            buf = bytearray(h * row_bytes)
+            received = 0
+        else:
+            _, _, _, buf, received = entry
+        raw = chunk.section("data")
+        start = chunk.row_offset * row_bytes
+        end = min((chunk.row_offset + chunk.rows) * row_bytes, len(buf))
+        n = min(end - start, len(raw))
+        if n > 0:
+            buf[start : start + n] = raw[:n]
+            received += chunk.rows
+        self._cam_bufs[chunk.channel] = (chunk.sample, w, h, buf, received)
+        if chunk.is_last:
+            self._cam_bufs.pop(chunk.channel, None)
+            if received < h:
+                return None
+            return CameraImage(
+                link=self.link,
+                sim_time_s=chunk.sim_time_s,
+                sample=chunk.sample,
+                width=w,
+                height=h,
+                channel=chunk.channel,
+                fov_y_rad=chunk.fov_y_rad,
+                max_range_m=chunk.max_range_m,
+                data=bytes(buf),
+                props=chunk.props,
+            )
+        return None
+
+
 GREENHOUSE_OP = {
     "sow": 0, "harvest": 1, "clear": 2, "wash": 3, "amend": 4, "lamps": 5, "clean_tank": 6,
     "fault": 7, "repair": 8, "setpoint": 9, "clean_panels": 10, "clean_glazing": 11,
@@ -494,6 +1035,37 @@ def machine_topic(namespace: str, leaf: str) -> str:
 # ─── Client ──────────────────────────────────────────────────────────
 
 
+def _cli_secret_key() -> bytes | None:
+    """Persistent ed25519 key for `gearbox-cli` (trusted by local Gearbox hosts)."""
+    base = os.environ.get("XDG_DATA_HOME")
+    root = Path(base) if base else Path.home() / ".local" / "share"
+    path = root / "agentio" / "keys" / "name" / "gearbox-cli.key"
+    try:
+        raw = path.read_bytes()
+        return raw if len(raw) == 32 else None
+    except OSError:
+        return None
+
+
+def _default_node() -> peerbus.Node:
+    """Create a peerbus Node matching Gearbox's local SHM limits and CLI identity."""
+    kwargs: dict[str, object] = {
+        "no_relay": True,
+        "max_payload_bytes": 16 * 1024,
+        "history_depth": 1,
+        "subscriber_buffer": 1024,
+        "max_publishers": 24,
+        "max_subscribers": 16,
+    }
+    key = _cli_secret_key()
+    if key is not None:
+        kwargs["secret_key"] = key
+    try:
+        return peerbus.Node(**kwargs)
+    except TypeError:
+        return peerbus.Node(no_relay=True)
+
+
 class Gearbox:
     """One peerbus node talking to one host and any of its machines."""
 
@@ -504,7 +1076,7 @@ class Gearbox:
         else:
             self.instance = None
         self.addr = addr
-        self.node = node or peerbus.Node(no_relay=True)
+        self.node = node or _default_node()
         self._req: dict[tuple[str, str], object] = {}
         self._machines: dict[str, Machine] = {}
         self.draw = Draw(self)
@@ -855,6 +1427,24 @@ class Machine:
                 return None
             time.sleep(0.002)
 
+    def tf_latest(self) -> Tf | None:
+        """Drain `/tf` and return the newest `gearbox.tf.v1` snapshot, or None."""
+        if getattr(self, "_tf_sub", None) is None:
+            self._tf_sub = self.gb.subscribe(self.addr, self._topic("tf"), latest=True)
+        latest: Tf | None = None
+        for _ in range(32):
+            try:
+                msg = self._tf_sub.take_message()
+            except RuntimeError as err:
+                if "lagged" in str(err):
+                    continue
+                raise
+            if msg is None:
+                break
+            if msg.type_hash == Tf.TYPE_HASH:
+                latest = msg.decode(Tf)
+        return latest
+
     def links(self) -> list[dict]:
         """The link tree, base_link first: name, parent, role, prim, offset."""
         out = []
@@ -867,6 +1457,14 @@ class Machine:
             })
             out.append(d)
         return out
+
+    def sensors(self) -> list[dict]:
+        """Authored sensor links (`role == "sensor"`) on this machine."""
+        return [l for l in self.links() if l.get("role") == "sensor"]
+
+    def subscribe_sensor(self, link: str) -> SensorStream:
+        """Subscribe over peerbus shared memory to `/machines/<id>/sensors/<link>`."""
+        return SensorStream(self.gb, self.addr, self._topic(f"sensors/{link}"), link)
 
     def state(self, wait: float = 0.0) -> MachineState | None:
         """Latest state sample, or the last one seen when none is pending."""

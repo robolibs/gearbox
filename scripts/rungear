@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""Launch `rungear` directly from the repo without a separate install step."""
+import sys
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parents[1]
+for _p in (str(_ROOT / "packages" / "rungear" / "src"), str(_ROOT / "scripts" / "control"), str(_ROOT / ".python-packages")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from rungear.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main())

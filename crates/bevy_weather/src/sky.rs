@@ -328,6 +328,41 @@ pub struct WeatherLook;
 /// match the weather, kept in step with the daylight. `lean` leaves out
 /// bloom and multisampling.
 pub fn camera_look(camera: &mut EntityCommands, settings: &WeatherSettings, lean: bool) {
+    insert_weather_look(camera, settings);
+    if lean {
+        camera.insert((Msaa::Off, RenderLayers::layer(crate::LEAN_LAYER)));
+    } else {
+        camera.insert((
+            Msaa::Sample4,
+            Bloom {
+                intensity: settings.bloom_intensity,
+                ..Bloom::NATURAL
+            },
+        ));
+    }
+}
+
+/// Gives an offscreen `full` sensor camera the same weather lighting, fog, AgX
+/// tonemapping, Bloom and 4x MSAA (for `alpha_to_coverage` vegetation clumps
+/// and smooth grass blades) as the viewer camera. When `shadows` is false, the
+/// camera renders on [`crate::LEAN_LAYER`] using the shadowless twin of the sun
+/// (`LeanSun`, which still carries cloud shadows without rendering 4x4096
+/// directional shadow cascades per sensor frame).
+pub fn sensor_camera_look(camera: &mut EntityCommands, settings: &WeatherSettings, shadows: bool) {
+    insert_weather_look(camera, settings);
+    camera.insert((
+        Msaa::Sample4,
+        Bloom {
+            intensity: settings.bloom_intensity,
+            ..Bloom::NATURAL
+        },
+    ));
+    if !shadows {
+        camera.insert(RenderLayers::layer(crate::LEAN_LAYER));
+    }
+}
+
+fn insert_weather_look(camera: &mut EntityCommands, settings: &WeatherSettings) {
     camera.insert((
         WeatherLook,
         Hdr,
@@ -360,17 +395,6 @@ pub fn camera_look(camera: &mut EntityCommands, settings: &WeatherSettings, lean
         camera.insert((settings, AtmosphereEnvironmentMapLight::default()));
     } else {
         camera.insert(EnvironmentMapLight::default());
-    }
-    if lean {
-        camera.insert((Msaa::Off, RenderLayers::layer(crate::LEAN_LAYER)));
-    } else {
-        camera.insert((
-            Msaa::Sample4,
-            Bloom {
-                intensity: settings.bloom_intensity,
-                ..Bloom::NATURAL
-            },
-        ));
     }
 }
 

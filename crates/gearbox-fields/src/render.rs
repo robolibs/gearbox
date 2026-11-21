@@ -9,6 +9,7 @@ use bevy::pbr::{
     SetMeshViewBindingArrayBindGroup, ViewKeyCache,
 };
 use bevy::prelude::*;
+use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::mesh::allocator::MeshAllocator;
@@ -39,6 +40,8 @@ pub struct VegetationChunk {
     pub corner: Vec2,
     /// Chunk side in metres.
     pub size: f32,
+    /// Terrain height bounds (low, high) in metres for per-view frustum culling.
+    pub height_span: Vec2,
     pub instances: u32,
     pub capacity: f32,
     pub field_id: Entity,
@@ -221,6 +224,82 @@ impl Plugin for VegetationPlugin {
 /// Transparent3d sort offset placing vegetation before every blended item.
 pub(crate) const OPAQUE_FIRST: f32 = -1.0e6;
 
+/// Slack on a detail band's edges, matching `runtime::BAND_MARGIN_M`.
+const BAND_MARGIN_M: f32 = 2.0;
+
+/// Six clip-space half-space planes extracted from a view's reverse-Z
+/// `clip_from_world` matrix (left, right, bottom, top, far, near).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ViewFrustum([Vec4; 6]);
+
+impl ViewFrustum {
+    pub(crate) fn from_clip_from_world(m: Mat4) -> Self {
+        let r0 = m.row(0);
+        let r1 = m.row(1);
+        let r2 = m.row(2);
+        let r3 = m.row(3);
+        Self([r3 + r0, r3 - r0, r3 + r1, r3 - r1, r2, r3 - r2])
+    }
+
+    #[inline]
+    pub(crate) fn intersects_aabb(&self, min: Vec3, max: Vec3) -> bool {
+        let center = (min + max) * 0.5;
+        let half = (max - min) * 0.5;
+        for plane in self.0 {
+            let n = plane.truncate();
+            if n.dot(center) + plane.w + half.dot(n.abs()) < 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Builds a frustum for `view` from its clip and world transforms.
+pub(crate) fn view_frustum(view: &ExtractedView) -> ViewFrustum {
+    let clip_from_world = view.clip_from_view * view.world_from_view.affine().inverse();
+    ViewFrustum::from_clip_from_world(clip_from_world)
+}
+
+/// Whether a vegetation chunk intersects `view`'s frustum, fade range, and
+/// optional LOD distance band.
+pub(crate) fn chunk_in_view(
+    corner: Vec2,
+    size: f32,
+    height_span: Vec2,
+    fade_end: f32,
+    band: Option<Vec2>,
+    view: &ExtractedView,
+    frustum: &ViewFrustum,
+) -> bool {
+    let min = Vec3::new(corner.x, height_span.x, corner.y);
+    let max = Vec3::new(corner.x + size, height_span.y, corner.y + size);
+    let eye = view.world_from_view.translation();
+    let clamped = eye.clamp(min, max);
+    let nearest_sq = (eye - clamped).length_squared();
+    if nearest_sq > fade_end * fade_end {
+        return false;
+    }
+    if let Some(band) = band {
+        let max_d = band.y + BAND_MARGIN_M;
+        if max_d.is_finite() && nearest_sq > max_d * max_d {
+            return false;
+        }
+        let min_d = (band.x - BAND_MARGIN_M).max(0.0);
+        if min_d > 0.0 {
+            let far = Vec3::new(
+                (eye.x - min.x).abs().max((eye.x - max.x).abs()),
+                (eye.y - min.y).abs().max((eye.y - max.y).abs()),
+                (eye.z - min.z).abs().max((eye.z - max.z).abs()),
+            );
+            if far.length_squared() < min_d * min_d {
+                return false;
+            }
+        }
+    }
+    frustum.intersects_aabb(min, max)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn queue_vegetation(
     draw_functions: Res<DrawFunctions<Transparent3d>>,
@@ -230,7 +309,7 @@ fn queue_vegetation(
     meshes: Res<RenderAssets<RenderMesh>>,
     chunks: Query<(Entity, &MainEntity, &VegetationChunk)>,
     mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
-    views: Query<&ExtractedView, Without<NoVegetation>>,
+    views: Query<&ExtractedView, (With<ExtractedCamera>, Without<NoVegetation>)>,
     view_key_cache: Res<ViewKeyCache>,
     fields: Res<RenderFields>,
     mut warned: Local<bool>,
@@ -247,8 +326,20 @@ fn queue_vegetation(
             continue;
         };
         let view_from_world = view.world_from_view.affine().inverse();
+        let frustum = view_frustum(view);
         for (entity, main_entity, draw) in &chunks {
             if !fields.0.contains_key(&draw.field_id) || draw.instances == 0 || draw.blade.is_some() {
+                continue;
+            }
+            if !chunk_in_view(
+                draw.corner,
+                draw.size,
+                draw.height_span,
+                draw.fade_end,
+                None,
+                view,
+                &frustum,
+            ) {
                 continue;
             }
             let Some(mesh) = meshes.get(draw.mesh.id()) else {
@@ -836,13 +927,13 @@ struct SetSieveBindGroup<const I: usize>;
 
 impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetSieveBindGroup<I> {
     type Param = (Option<SRes<FieldBindGroups>>, SRes<super::sieve::SieveViews>);
-    type ViewQuery = Entity;
+    type ViewQuery = &'static ExtractedView;
     type ItemQuery = Read<VegetationChunk>;
 
     #[inline]
     fn render<'w>(
         item: &P,
-        view: Entity,
+        view: &'w ExtractedView,
         draw: Option<&'w VegetationChunk>,
         (groups, sieves): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
@@ -854,7 +945,7 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetSieveBindGroup<I> {
             pass.set_bind_group(I, &groups.into_inner().empty, &[]);
             return RenderCommandResult::Success;
         }
-        let Some((group, slot)) = sieves.into_inner().slot(view, item.entity()) else {
+        let Some((group, slot)) = sieves.into_inner().slot(view.retained_view_entity, item.entity()) else {
             return RenderCommandResult::Skip;
         };
         pass.set_bind_group(I, group, &[slot.region]);
@@ -920,13 +1011,13 @@ impl<P: PhaseItem> RenderCommand<P> for DrawBlades {
         SRes<MeshAllocator>,
         SRes<super::sieve::SieveViews>,
     );
-    type ViewQuery = Entity;
+    type ViewQuery = &'static ExtractedView;
     type ItemQuery = Read<VegetationChunk>;
 
     #[inline]
     fn render<'w>(
         item: &P,
-        view: Entity,
+        view: &'w ExtractedView,
         draw: Option<&'w VegetationChunk>,
         (meshes, mesh_allocator, sieves): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
@@ -954,7 +1045,7 @@ impl<P: PhaseItem> RenderCommand<P> for DrawBlades {
                 pass.set_index_buffer(index_slice.buffer.slice(..), *index_format);
                 let start = index_slice.range.start;
                 if draw.sieve.is_some() {
-                    let Some(args) = sieves.into_inner().args(view, item.entity()) else {
+                    let Some(args) = sieves.into_inner().args(view.retained_view_entity, item.entity()) else {
                         return RenderCommandResult::Skip;
                     };
                     pass.draw_indexed_indirect(args.0, args.1);

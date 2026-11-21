@@ -358,9 +358,10 @@ fn sow_blades(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invo
         first = atomicAdd(&args.sown, atomicLoad(&kept));
     }
     workgroupBarrier();
+    let capacity = min(job.counts.w, arrayLength(&records) / RECORD_WORDS);
     let at = first + slot;
     for (var i = 0u; i < count; i = i + 1u) {
-        if (at + i < job.counts.w) {
+        if (at + i < capacity) {
             write(at + i, blades[i]);
         }
     }
@@ -369,5 +370,6 @@ fn sow_blades(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invo
 // The sown count, clamped to what the records hold, becomes the instance count.
 @compute @workgroup_size(1)
 fn finish() {
-    args.instance_count = min(atomicLoad(&args.sown), job.counts.w);
+    let capacity = min(job.counts.w, arrayLength(&records) / RECORD_WORDS);
+    args.instance_count = min(atomicLoad(&args.sown), capacity);
 }
