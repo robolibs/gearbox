@@ -280,7 +280,7 @@ mod tests {
 use super::geometry::{clip_mesh, mesh_bounds};
 use super::layout::{FieldBounds, FieldLayout, FieldSpec};
 use super::profile::{FieldProfile, FieldProfiles, GroundSurface, VegetationLayer, WheelMapParams};
-use super::render::{FieldGpu, RenderFields, VegetationChunk, VegetationParams};
+use super::render::{FieldGpu, NoVegetation, RenderFields, VegetationChunk, VegetationParams};
 use crate::heights::HeightGrid;
 use crate::host::{CoverBackdrop, CoverHeights, CoverSurfaceMesh, CoverTerrain, HeightSource};
 use bevy::asset::RenderAssetUsages;
@@ -778,10 +778,15 @@ fn chunk_height_span(corner: Vec2, size: f32, ground: &dyn HeightSource) -> (f32
     (low - 2.0, high + 2.0)
 }
 
+/// Maximum vegetation streaming distance for offscreen sensor cameras (`order < 0`).
+/// Beyond this distance, blades at sensor resolutions are sub-pixel and fade into
+/// the ground material anyway.
+const SENSOR_VEGETATION_REACH_M: f32 = 48.0;
+
 pub fn stream_vegetation(
     mut commands: Commands,
     active: Option<Res<ActiveFields>>,
-    cameras: Query<(&GlobalTransform, &Frustum, &Camera), With<Camera3d>>,
+    cameras: Query<(&GlobalTransform, &Frustum, &Camera), (With<Camera3d>, Without<NoVegetation>)>,
     mut chunks: ResMut<VegetationChunks>,
     mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<AssetServer>,
@@ -810,69 +815,92 @@ pub fn stream_vegetation(
         *measured_in = space;
         heights.clear();
     }
-    // Streaming follows the last-drawn camera (the viewer); offscreen sensor
-    // cameras order themselves before it.
-    let Some((camera, frustum, _)) = cameras.iter().max_by_key(|(_, _, camera)| camera.order)
-    else {
+    let views: Vec<_> = cameras.iter().collect();
+    if views.is_empty() {
         return;
-    };
-    let eye = camera.translation().xz();
-    let eye_y = camera.translation().y;
+    }
     let only: Option<Vec<usize>> = std::env::var("GEARBOX_VEG_LAYERS")
         .ok()
         .map(|list| list.split(',').filter_map(|index| index.trim().parse().ok()).collect());
     let mut wanted: HashMap<_, _> = HashMap::default();
-    for field in &active.fields {
-        for (layer_index, layer) in field.profile.layers.iter().enumerate() {
-            if only.as_ref().is_some_and(|only| !only.contains(&layer_index)) {
-                continue;
-            }
-            if layer.density <= 0.0 || field.bounds.nearest_distance(eye) >= layer.fade_end {
-                continue;
-            }
-            let size = chunk_m(layer);
-            let min = (eye - Vec2::splat(layer.fade_end)).max(field.bounds.min);
-            let max = (eye + Vec2::splat(layer.fade_end)).min(field.bounds.max);
-            for z in (min.y / size).floor() as i32..=(max.y / size).floor() as i32 {
-                for x in (min.x / size).floor() as i32..=(max.x / size).floor() as i32 {
-                    let corner = Vec2::new(x as f32, z as f32) * size;
-                    let bounds = FieldBounds {
-                        min: corner.max(field.bounds.min),
-                        max: (corner + Vec2::splat(size)).min(field.bounds.max),
-                    };
-                    if !bounds.min.cmplt(bounds.max).all() {
-                        continue;
+    for &(camera, frustum, cam) in &views {
+        let eye = camera.translation().xz();
+        let eye_y = camera.translation().y;
+        let is_offscreen = cam.order < 0;
+        for field in &active.fields {
+            for (layer_index, layer) in field.profile.layers.iter().enumerate() {
+                if only.as_ref().is_some_and(|only| !only.contains(&layer_index)) {
+                    continue;
+                }
+                let reach = if is_offscreen {
+                    layer.fade_end.min(SENSOR_VEGETATION_REACH_M)
+                } else {
+                    layer.fade_end
+                };
+                if layer.density <= 0.0 || field.bounds.nearest_distance(eye) >= reach {
+                    continue;
+                }
+                let size = chunk_m(layer);
+                let min = (eye - Vec2::splat(reach)).max(field.bounds.min);
+                let max = (eye + Vec2::splat(reach)).min(field.bounds.max);
+                for z in (min.y / size).floor() as i32..=(max.y / size).floor() as i32 {
+                    for x in (min.x / size).floor() as i32..=(max.x / size).floor() as i32 {
+                        let corner = Vec2::new(x as f32, z as f32) * size;
+                        let bounds = FieldBounds {
+                            min: corner.max(field.bounds.min),
+                            max: (corner + Vec2::splat(size)).min(field.bounds.max),
+                        };
+                        if !bounds.min.cmplt(bounds.max).all() {
+                            continue;
+                        }
+                        let (low, high) = *heights
+                            .entry((x, z, size.to_bits()))
+                            .or_insert_with(|| chunk_height_span(corner, size, ground.0.as_ref()));
+                        // Blades fade by distance to the eye, so height above them counts.
+                        let lift = (eye_y - high).max(low - eye_y).max(0.0);
+                        let nearest = bounds.nearest_distance(eye).hypot(lift);
+                        if nearest >= reach {
+                            continue;
+                        }
+                        let farthest = farthest_distance(&bounds, eye)
+                            .hypot((eye_y - low).abs().max((eye_y - high).abs()));
+                        // Beyond this detail level's band the next mesh takes over.
+                        if nearest > layer.lod_band[1] + BAND_MARGIN_M
+                            || farthest < layer.lod_band[0] - BAND_MARGIN_M
+                        {
+                            continue;
+                        }
+                        if layer.way_only && chunk_tread(field, corner, size) == Vec4::ZERO {
+                            continue;
+                        }
+                        if layer.worked_only
+                            && !worked.as_ref().is_some_and(|cells| cells.touches(bounds))
+                        {
+                            continue;
+                        }
+                        let capacity = size * size * layer.density;
+                        let instances = band_budget(capacity, nearest, layer);
+                        if instances == 0 {
+                            continue;
+                        }
+                        // Chunks outside every view keep their slot but draw nothing.
+                        let extent = Aabb::from_min_max(
+                            Vec3::new(corner.x, low, corner.y),
+                            Vec3::new(corner.x + size, high, corner.y + size),
+                        );
+                        let instances = if frustum.intersects_obb_identity(&extent) {
+                            instances
+                        } else {
+                            0
+                        };
+                        let key = (field.entity, layer_index, x, z);
+                        wanted
+                            .entry(key)
+                            .and_modify(|(_, _, _, _, _, prev): &mut (_, _, _, _, _, u32)| {
+                                *prev = (*prev).max(instances);
+                            })
+                            .or_insert((field, layer, size, Vec2::new(low, high), capacity, instances));
                     }
-                    let (low, high) = *heights
-                        .entry((x, z, size.to_bits()))
-                        .or_insert_with(|| chunk_height_span(corner, size, ground.0.as_ref()));
-                    // Blades fade by distance to the eye, so height above them counts.
-                    let lift = (eye_y - high).max(low - eye_y).max(0.0);
-                    let nearest = bounds.nearest_distance(eye).hypot(lift);
-                    let farthest = farthest_distance(&bounds, eye).hypot((eye_y - low).abs().max((eye_y - high).abs()));
-                    // Beyond this detail level's band the next mesh takes over.
-                    if nearest > layer.lod_band[1] + BAND_MARGIN_M || farthest < layer.lod_band[0] - BAND_MARGIN_M {
-                        continue;
-                    }
-                    if layer.way_only && chunk_tread(field, corner, size) == Vec4::ZERO {
-                        continue;
-                    }
-                    if layer.worked_only && !worked.as_ref().is_some_and(|cells| cells.touches(bounds)) {
-                        continue;
-                    }
-                    let capacity = size * size * layer.density;
-                    let instances = band_budget(capacity, nearest, layer);
-                    if instances == 0 {
-                        continue;
-                    }
-                    // Chunks outside the view keep their slot but draw nothing.
-                    let extent = Aabb::from_min_max(
-                        Vec3::new(corner.x, low, corner.y),
-                        Vec3::new(corner.x + size, high, corner.y + size),
-                    );
-                    let instances = if frustum.intersects_obb_identity(&extent) { instances } else { 0 };
-                    let key = (field.entity, layer_index, x, z);
-                    wanted.insert(key, (field, layer, size, capacity, instances));
                 }
             }
         }
@@ -885,10 +913,11 @@ pub fn stream_vegetation(
             false
         }
     });
-    for (key, (field, layer, size, capacity, instances)) in wanted {
+    for (key, (field, layer, size, height_span, capacity, instances)) in wanted {
         if let Some(&entity) = chunks.0.get(&key) {
             if let Ok(mut draw) = draws.get_mut(entity) {
                 draw.instances = instances;
+                draw.height_span = height_span;
             }
             continue;
         }
@@ -912,6 +941,7 @@ pub fn stream_vegetation(
                 VegetationChunk {
                     corner,
                     size,
+                    height_span,
                     instances,
                     capacity,
                     field_id: field.entity,

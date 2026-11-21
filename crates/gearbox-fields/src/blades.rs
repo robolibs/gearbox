@@ -6,7 +6,7 @@
 use super::profile::{BladeKind, FieldProfiles};
 use super::render::{
     FieldBindGroups, NoVegetation, OPAQUE_FIRST, SetEmptyBindGroup, VegetationChunk,
-    VegetationOffset, VegetationPipeline,
+    VegetationOffset, VegetationPipeline, chunk_in_view, view_frustum,
 };
 use bevy::core_pipeline::core_3d::{Transparent3d, TransparentSortingInfo3d};
 use bevy::core_pipeline::schedule::{Core3d, Core3dSystems};
@@ -19,6 +19,7 @@ use bevy::pbr::{
 };
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
+use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::globals::{GlobalsBuffer, GlobalsUniform};
 use bevy::render::mesh::allocator::MeshAllocator;
@@ -35,7 +36,9 @@ use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::sync_component::SyncComponent;
 use bevy::render::sync_world::MainEntity;
-use bevy::render::view::{ExtractedView, ViewUniform, ViewUniformOffset, ViewUniforms};
+use bevy::render::view::{
+    ExtractedView, RetainedViewEntity, ViewUniform, ViewUniformOffset, ViewUniforms,
+};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
 const WORKGROUP: u32 = 64;
@@ -43,6 +46,24 @@ const WORKGROUP: u32 = 64;
 /// Words of the indirect arguments buffer: draw arguments, the append
 /// counter, padding.
 const ARGS_WORDS: usize = 8;
+
+/// Frames an inactive view's GPU blade buffers stay warm before eviction, so
+/// periodic sensor cameras (e.g. 5-30 Hz) reuse their buffers instead of
+/// reallocating tens of megabytes every sample.
+const VIEW_BUFFER_TTL_FRAMES: u32 = 180;
+
+/// Scales a blade kind's record buffer capacity for small viewports (such as
+/// 320x240 sensor cameras), where pixel-width thinning keeps blade counts far
+/// below a full-HD viewer's ceiling.
+fn blade_capacity_for_viewport(base: u32, viewport: UVec4) -> u32 {
+    let pixels = viewport.z as f64 * viewport.w as f64;
+    let full_hd = 1920.0 * 1080.0;
+    if pixels <= 0.0 || pixels >= full_hd {
+        return base;
+    }
+    let scale = (pixels / full_hd).sqrt().clamp(0.15, 1.0);
+    ((base as f64 * scale).round() as u32).clamp(16_384, base)
+}
 
 /// The draw every view makes of one blade kind's records.
 #[derive(Component, Clone)]
@@ -162,6 +183,11 @@ struct BladeJob {
     field_offset: u32,
     dispatch_offset: u32,
     instances: u32,
+    corner: Vec2,
+    size: f32,
+    height_span: Vec2,
+    fade_end: f32,
+    band: Vec2,
     centre: Vec3,
 }
 
@@ -181,12 +207,13 @@ struct ViewKind {
 struct ViewBlades {
     view_group: BindGroup,
     kinds: HashMap<&'static str, ViewKind>,
-    /// Records and arguments per kind, kept across frames.
-    buffers: HashMap<&'static str, (Buffer, Buffer)>,
+    /// Records, arguments and capacity per kind, kept warm across frames.
+    buffers: HashMap<&'static str, (Buffer, Buffer, u32)>,
+    idle_frames: u32,
 }
 
 #[derive(Resource, Default)]
-struct BladeViews(HashMap<Entity, ViewBlades>);
+struct BladeViews(HashMap<RetainedViewEntity, ViewBlades>);
 
 #[derive(Resource)]
 struct BladePipelines {
@@ -270,6 +297,11 @@ fn prepare_blade_jobs(
             field_offset: offset.0,
             dispatch_offset,
             instances: chunk.instances,
+            corner: chunk.corner,
+            size: chunk.size,
+            height_span: chunk.height_span,
+            fade_end: chunk.fade_end,
+            band: chunk.band,
             centre: Vec3::new(chunk.corner.x + half, 0.0, chunk.corner.y + half),
         });
     }
@@ -280,7 +312,11 @@ fn prepare_blade_jobs(
 /// draws vegetation, and the sow pipelines of every kind.
 #[allow(clippy::too_many_arguments)]
 fn prepare_blade_views(
-    views: Query<Entity, (With<ExtractedView>, With<ViewUniformOffset>, Without<NoVegetation>)>,
+    views: Query<
+        &ExtractedView,
+        (With<ExtractedCamera>, With<ViewUniformOffset>, Without<NoVegetation>),
+    >,
+    phases: Res<ViewSortedRenderPhases<Transparent3d>>,
     draws: Query<&BladeDraw>,
     jobs: Res<BladeJobs>,
     mut state: ResMut<BladeViews>,
@@ -314,8 +350,20 @@ fn prepare_blade_views(
             (pipeline("sow_blades"), pipeline("finish"))
         });
     }
-    let live: HashSet<Entity> = views.iter().collect();
-    state.0.retain(|view, _| live.contains(view));
+    let live: HashSet<RetainedViewEntity> = views
+        .iter()
+        .map(|extracted| extracted.retained_view_entity)
+        .filter(|id| phases.contains_key(id))
+        .collect();
+    state.0.retain(|view, blades| {
+        if live.contains(view) {
+            blades.idle_frames = 0;
+            true
+        } else {
+            blades.idle_frames += 1;
+            blades.idle_frames <= VIEW_BUFFER_TTL_FRAMES
+        }
+    });
     // Without this frame's jobs nothing is sown, so nothing may be drawn from
     // the records of an earlier frame.
     for blades in state.0.values_mut() {
@@ -331,18 +379,24 @@ fn prepare_blade_views(
     if jobs.jobs.is_empty() {
         return;
     }
-    for view in &views {
+    for extracted in &views {
+        let view_id = extracted.retained_view_entity;
+        if !phases.contains_key(&view_id) {
+            continue;
+        }
         let view_group = render_device.create_bind_group(
             "blade view",
             &pipeline_cache.get_bind_group_layout(&pipelines.view_layout),
             &BindGroupEntries::with_indices(((0, view_binding.clone()), (11, globals_binding.clone()))),
         );
-        let blades = state.0.entry(view).or_insert_with(|| ViewBlades {
+        let blades = state.0.entry(view_id).or_insert_with(|| ViewBlades {
             view_group: view_group.clone(),
             kinds: HashMap::default(),
             buffers: HashMap::default(),
+            idle_frames: 0,
         });
         blades.view_group = view_group;
+        blades.idle_frames = 0;
         for draw in &draws {
             let (Some(mesh), Some(vertices), Some(indices)) = (
                 meshes.get(draw.template.id()),
@@ -354,25 +408,27 @@ fn prepare_blade_views(
             let RenderMeshBufferInfo::Indexed { count, .. } = &mesh.buffer_info else {
                 continue;
             };
-            let (records, args) = blades
+            let wanted_cap = blade_capacity_for_viewport(draw.kind.capacity, extracted.viewport);
+            let needs_alloc = blades
                 .buffers
-                .entry(draw.kind.cull)
-                .or_insert_with(|| {
-                    let records = render_device.create_buffer(&BufferDescriptor {
-                        label: Some("blade records"),
-                        size: draw.kind.capacity as u64 * draw.kind.stride as u64 * 4,
-                        usage: BufferUsages::STORAGE,
-                        mapped_at_creation: false,
-                    });
-                    let args = render_device.create_buffer(&BufferDescriptor {
-                        label: Some("blade arguments"),
-                        size: (ARGS_WORDS * 4) as u64,
-                        usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    });
-                    (records, args)
-                })
-                .clone();
+                .get(draw.kind.cull)
+                .is_none_or(|(_, _, cap)| *cap < wanted_cap);
+            if needs_alloc {
+                let records = render_device.create_buffer(&BufferDescriptor {
+                    label: Some("blade records"),
+                    size: wanted_cap as u64 * draw.kind.stride as u64 * 4,
+                    usage: BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                });
+                let args = render_device.create_buffer(&BufferDescriptor {
+                    label: Some("blade arguments"),
+                    size: (ARGS_WORDS * 4) as u64,
+                    usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                blades.buffers.insert(draw.kind.cull, (records, args, wanted_cap));
+            }
+            let (records, args, _) = blades.buffers[draw.kind.cull].clone();
             let reset: [u32; ARGS_WORDS] = [
                 *count,
                 0,
@@ -415,16 +471,33 @@ fn sow_blades(
     fields: Option<Res<FieldBindGroups>>,
     mut ctx: RenderContext,
 ) {
-    let entity = view.entity();
     let (extracted, view_offset) = view.into_inner();
-    let (Some(blades), Some(fields)) = (state.0.get(&entity), fields) else {
+    let (Some(blades), Some(fields)) = (state.0.get(&extracted.retained_view_entity), fields) else {
         return;
     };
     if jobs.jobs.is_empty() {
         return;
     }
     let eye = extracted.world_from_view.translation();
-    let mut order: Vec<&BladeJob> = jobs.jobs.iter().collect();
+    let frustum = view_frustum(extracted);
+    let mut order: Vec<&BladeJob> = jobs
+        .jobs
+        .iter()
+        .filter(|job| {
+            chunk_in_view(
+                job.corner,
+                job.size,
+                job.height_span,
+                job.fade_end,
+                Some(job.band),
+                extracted,
+                &frustum,
+            )
+        })
+        .collect();
+    if order.is_empty() {
+        return;
+    }
     order.sort_by(|a, b| a.centre.distance_squared(eye).total_cmp(&b.centre.distance_squared(eye)));
 
     let mut pass = ctx.command_encoder().begin_compute_pass(&ComputePassDescriptor {
@@ -442,20 +515,24 @@ fn sow_blades(
         else {
             continue;
         };
-        pass.set_pipeline(sow);
         let mut last = None;
         for job in order.iter().filter(|job| job.kind == *kind) {
             let Some(field) = fields.fields.get(&job.field) else {
                 continue;
             };
+            if last.is_none() {
+                pass.set_pipeline(sow);
+            }
             pass.set_bind_group(1, &target.sow_group, &[job.dispatch_offset]);
             pass.set_bind_group(3, field, &[job.field_offset]);
             pass.dispatch_workgroups(job.instances.div_ceil(WORKGROUP), 1, 1);
             last = Some(job.dispatch_offset);
         }
-        pass.set_pipeline(finish);
-        pass.set_bind_group(1, &target.sow_group, &[last.unwrap_or(0)]);
-        pass.dispatch_workgroups(1, 1, 1);
+        if let Some(dispatch_offset) = last {
+            pass.set_pipeline(finish);
+            pass.set_bind_group(1, &target.sow_group, &[dispatch_offset]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
     }
 }
 
@@ -501,6 +578,12 @@ impl SpecializedMeshPipeline for BladePipelines {
 }
 
 /// One item per kind per view, ahead of every chunk and blended item.
+///
+/// Queued unconditionally for every vegetation view because `QueueMeshes` runs
+/// before `prepare_blade_views` (`PrepareBindGroups`): intermittently-active
+/// views (such as sensor cameras) would otherwise miss their draw whenever
+/// their state is prepared on the same frame. `DrawBladeRecords` skips any
+/// kind that had no blades sown.
 #[allow(clippy::too_many_arguments)]
 fn queue_blades(
     draw_functions: Res<DrawFunctions<Transparent3d>>,
@@ -510,15 +593,11 @@ fn queue_blades(
     meshes: Res<RenderAssets<RenderMesh>>,
     draws: Query<(Entity, &MainEntity, &BladeDraw)>,
     mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
-    views: Query<(Entity, &ExtractedView), Without<NoVegetation>>,
+    views: Query<&ExtractedView, (With<ExtractedCamera>, Without<NoVegetation>)>,
     view_key_cache: Res<ViewKeyCache>,
-    state: Res<BladeViews>,
 ) {
     let draw_blades = draw_functions.read().id::<DrawSownBlades>();
-    for (view_entity, view) in &views {
-        let Some(blades) = state.0.get(&view_entity) else {
-            continue;
-        };
+    for view in &views {
         let (Some(phase), Some(&view_key)) = (
             phases.get_mut(&view.retained_view_entity),
             view_key_cache.get(&view.retained_view_entity),
@@ -527,9 +606,6 @@ fn queue_blades(
         };
         let view_from_world = view.world_from_view.affine().inverse();
         for (entity, main_entity, draw) in &draws {
-            if !blades.kinds.contains_key(draw.kind.cull) {
-                continue;
-            }
             let Some(mesh) = meshes.get(draw.template.id()) else {
                 continue;
             };
@@ -583,13 +659,13 @@ struct DrawBladeRecords;
 
 impl<P: PhaseItem> RenderCommand<P> for DrawBladeRecords {
     type Param = (SRes<BladeViews>, SRes<RenderAssets<RenderMesh>>, SRes<MeshAllocator>);
-    type ViewQuery = Entity;
+    type ViewQuery = &'static ExtractedView;
     type ItemQuery = Read<BladeDraw>;
 
     #[inline]
     fn render<'w>(
         _item: &P,
-        view: Entity,
+        view: &'w ExtractedView,
         draw: Option<&'w BladeDraw>,
         (state, meshes, mesh_allocator): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
@@ -599,7 +675,11 @@ impl<P: PhaseItem> RenderCommand<P> for DrawBladeRecords {
         let Some(draw) = draw else {
             return RenderCommandResult::Skip;
         };
-        let Some(target) = state.0.get(&view).and_then(|blades| blades.kinds.get(draw.kind.cull)) else {
+        let Some(target) = state
+            .0
+            .get(&view.retained_view_entity)
+            .and_then(|blades| blades.kinds.get(draw.kind.cull))
+        else {
             return RenderCommandResult::Skip;
         };
         let id = draw.template.id();
