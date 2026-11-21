@@ -775,6 +775,13 @@ pub(crate) fn run_machine_sensors(
                 Ok(mut rig) => {
                     rig.model = Some(model.clone());
                     rig.machine = machine.id.clone();
+                    // Register every sensor topic's SHM publisher as soon as the
+                    // rig builds (even while the clock is paused) so local
+                    // subscribers attach to shared memory instead of falling
+                    // back permanently to remote QUIC streams.
+                    for mount in &rig.mounts {
+                        let _ = agent.sensor_subscribed(&mount.name);
+                    }
                     info!(
                         "gearbox-sensors: `{}` samples {} sensor link(s) on scene revision {revision}, built in {:.0} ms",
                         machine.id,

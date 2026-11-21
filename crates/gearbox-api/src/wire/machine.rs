@@ -328,7 +328,7 @@ pub const CAMERA_DEPTH: u32 = 1;
 
 /// Bytes of pixel data per chunk, under [`crate::host::MAX_PAYLOAD_BYTES`]
 /// with the header and props.
-pub const CAMERA_CHUNK_BYTES: usize = 12 * 1024;
+pub const CAMERA_CHUNK_BYTES: usize = 15 * 1024;
 
 impl CameraFrame {
     pub fn props(&self) -> Props {

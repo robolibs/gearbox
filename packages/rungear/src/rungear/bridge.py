@@ -363,14 +363,23 @@ class RungearBridge:
         blueprint_dirty = False
         for link, stream in list(b.sensor_streams.items()):
             try:
-                events = stream.drain(limit=128)
+                events = stream.drain(limit=4096)
             except Exception as err:  # noqa: BLE001
                 print(f"[rungear] {b.id}/{link} drain error: {err}", file=sys.stderr)
                 continue
             if not events:
                 continue
             did_work = True
-            for kind, payload in events:
+            # If multiple camera frames arrived in one drain burst, keep only
+            # the latest per channel so Rerun stays real-time without backlog.
+            latest_cam_idx: dict[int, int] = {}
+            for idx, (kind, payload) in enumerate(events):
+                if kind == "camera" and isinstance(payload, CameraImage):
+                    latest_cam_idx[payload.channel] = idx
+            for idx, (kind, payload) in enumerate(events):
+                if kind == "camera" and isinstance(payload, CameraImage):
+                    if latest_cam_idx.get(payload.channel) != idx:
+                        continue
                 prev_kind = b.sensor_kinds.get(link)
                 logged_kind = self._log_sensor(b, link, kind, payload)
                 if logged_kind and logged_kind != prev_kind:
@@ -470,20 +479,27 @@ class RungearBridge:
                 )
             if payload.channel == CAMERA_COLOR:
                 rgba = np.frombuffer(payload.data, dtype=np.uint8).reshape((payload.height, payload.width, 4))
-                rr.log(f"{entity}/color", rr.Image(rgba[:, :, :3]))
+                rr.log(f"{entity}/color", rr.Image(rgba, color_model="RGBA"))
             elif payload.channel == CAMERA_DEPTH:
-                depths = np.frombuffer(payload.data, dtype="<f4").reshape((payload.height, payload.width)).copy()
-                valid = np.isfinite(depths) & (depths > 0.0)
-                depths[~valid] = 0.0
-                d_lo = float(np.percentile(depths[valid], 2)) if np.any(valid) else 0.5
-                d_hi = float(min(np.percentile(depths[valid], 98), 35.0)) if np.any(valid) else 25.0
+                depths = np.frombuffer(payload.data, dtype="<f4").reshape((payload.height, payload.width))
+                sample = depths[::8, ::8]
+                valid_sample = sample[np.isfinite(sample) & (sample > 0.0)]
+                if valid_sample.size > 0:
+                    d_lo = float(np.percentile(valid_sample, 2))
+                    d_hi = float(min(np.percentile(valid_sample, 98), 35.0))
+                else:
+                    d_lo, d_hi = 0.5, 25.0
                 if d_hi <= d_lo + 0.1:
                     d_hi = d_lo + 5.0
+                # Quantise to uint16 mm (1 mm precision up to 65.5 m): halves
+                # gRPC & Rerun viewer memory bandwidth vs raw f32.
+                valid = np.isfinite(depths) & (depths > 0.0)
+                depths_mm = np.where(valid, np.clip(depths * 1000.0, 0.0, 65535.0), 0.0).astype(np.uint16)
                 # Log depth under `cameras/...` (outside the 3D Pinhole) so 2D depth
                 # displays cleanly in Turbo without projecting a 100 m sheet over the LiDAR.
                 rr.log(
                     f"cameras/{b.id}/{link}/depth",
-                    rr.DepthImage(depths, meter=1.0, colormap="turbo", depth_range=[d_lo, d_hi]),
+                    rr.DepthImage(depths_mm, meter=1000.0, colormap="turbo", depth_range=[d_lo, d_hi]),
                 )
             return "camera"
 

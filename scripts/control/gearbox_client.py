@@ -713,6 +713,12 @@ class CameraImage:
     props: dict[str, str] = field(default_factory=dict)
 
 
+_CAM_HEADER = struct.Struct("<3d12I")
+_CAM_HEADER_SIZE = _CAM_HEADER.size
+_LIDAR_HEADER = struct.Struct("<6d14I")
+_LIDAR_HEADER_SIZE = _LIDAR_HEADER.size
+
+
 class SensorStream:
     """Peerbus subscriber for one simulated sensor link (`/machines/<id>/sensors/<link>`).
 
@@ -739,12 +745,42 @@ class SensorStream:
 
         `kind` is one of `"imu"`, `"lidar"`, `"camera"`, `"measurement"`.
         """
-        if self._sub is None:
+        sub = self._sub
+        if sub is None:
             return []
         out: list[tuple[str, object]] = []
+        take_view = getattr(sub, "take_view", None)
+        imu_hash = Imu.TYPE_HASH
+        meas_hash = Measurement.TYPE_HASH
+        lidar_hash = LidarScan.TYPE_HASH
+        cam_hash = CameraFrame.TYPE_HASH
+        if take_view is not None:
+            for _ in range(limit):
+                try:
+                    view = take_view()
+                except RuntimeError as err:
+                    if "lagged" in str(err):
+                        continue
+                    raise
+                if view is None:
+                    break
+                th = view.type_hash
+                if th == cam_hash:
+                    img = self._push_camera_wire(view.wire_view())
+                    if img is not None:
+                        out.append(("camera", img))
+                elif th == lidar_hash:
+                    sweep = self._push_lidar_wire(view.wire_view())
+                    if sweep is not None:
+                        out.append(("lidar", sweep))
+                elif th == imu_hash:
+                    out.append(("imu", Imu.from_wire_message(th, bytes(view.wire_view()))))
+                elif th == meas_hash:
+                    out.append(("measurement", Measurement.from_wire_message(th, bytes(view.wire_view()))))
+            return out
         for _ in range(limit):
             try:
-                msg = self._sub.take_message()
+                msg = sub.take_message()
             except RuntimeError as err:
                 if "lagged" in str(err):
                     continue
@@ -752,19 +788,122 @@ class SensorStream:
             if msg is None:
                 break
             th = msg.type_hash
-            if th == Imu.TYPE_HASH:
+            if th == imu_hash:
                 out.append(("imu", msg.decode(Imu)))
-            elif th == Measurement.TYPE_HASH:
+            elif th == meas_hash:
                 out.append(("measurement", msg.decode(Measurement)))
-            elif th == LidarScan.TYPE_HASH:
+            elif th == lidar_hash:
                 sweep = self._push_lidar(msg.decode(LidarScan))
                 if sweep is not None:
                     out.append(("lidar", sweep))
-            elif th == CameraFrame.TYPE_HASH:
+            elif th == cam_hash:
                 img = self._push_camera(msg.decode(CameraFrame))
                 if img is not None:
                     out.append(("camera", img))
         return out
+
+    def _push_lidar_wire(self, wire) -> LidarSweep | None:
+        mv = memoryview(wire)
+        if len(mv) < _LIDAR_HEADER_SIZE:
+            return None
+        (
+            sim_time_s, theta_min, theta_max, phi_min, phi_max, max_range_m,
+            _link_index, rows, cols, off, cnt, hits, _stamp_ms, sample,
+            r_off, r_len, p_off, p_len, props_off, props_len,
+        ) = _LIDAR_HEADER.unpack_from(mv, 0)
+        total = rows * cols
+        if total == 0:
+            return None
+        if self._lidar_sample != sample or len(self._lidar_ranges) != total * 4:
+            self._lidar_sample = sample
+            self._lidar_ranges = bytearray(total * 4)
+            self._lidar_points = bytearray(total * 12)
+            self._lidar_hits = 0
+            self._lidar_received = 0
+        if off + cnt <= total:
+            pbase = _LIDAR_HEADER_SIZE
+            if r_len >= cnt * 4:
+                self._lidar_ranges[off * 4 : (off + cnt) * 4] = mv[pbase + r_off : pbase + r_off + cnt * 4]
+            if p_len >= cnt * 12:
+                self._lidar_points[off * 12 : (off + cnt) * 12] = mv[pbase + p_off : pbase + p_off + cnt * 12]
+            self._lidar_hits += hits
+            self._lidar_received += cnt
+        if off + cnt >= total:
+            complete = self._lidar_received == total
+            if complete:
+                pbase = _LIDAR_HEADER_SIZE
+                props = (
+                    unpack_map(bytes(mv[pbase + props_off : pbase + props_off + props_len]))
+                    if props_len > 0
+                    else {}
+                )
+                sweep = LidarSweep(
+                    link=self.link,
+                    sim_time_s=sim_time_s,
+                    sample=sample,
+                    rows=rows,
+                    cols=cols,
+                    hits=self._lidar_hits,
+                    max_range_m=max_range_m,
+                    theta_min=theta_min,
+                    theta_max=theta_max,
+                    phi_min=phi_min,
+                    phi_max=phi_max,
+                    ranges_bytes=bytes(self._lidar_ranges),
+                    points_bytes=bytes(self._lidar_points),
+                    props=props,
+                )
+            else:
+                sweep = None
+            self._lidar_sample = None
+            return sweep
+        return None
+
+    def _push_camera_wire(self, wire) -> CameraImage | None:
+        mv = memoryview(wire)
+        if len(mv) < _CAM_HEADER_SIZE:
+            return None
+        (
+            sim_time_s, fov_y_rad, max_range_m,
+            _link_index, w, h, row_offset, rows, channel, _stamp_ms, sample,
+            data_off, data_len, props_off, props_len,
+        ) = _CAM_HEADER.unpack_from(mv, 0)
+        if w == 0 or h == 0:
+            return None
+        row_bytes = w * 4
+        entry = self._cam_bufs.get(channel)
+        if entry is None or entry[0] != sample or entry[1] != w or entry[2] != h:
+            buf = bytearray(h * row_bytes)
+            received = 0
+        else:
+            _, _, _, buf, received = entry
+        start = row_offset * row_bytes
+        end = min((row_offset + rows) * row_bytes, len(buf))
+        n = min(end - start, data_len)
+        if n > 0:
+            pbase = _CAM_HEADER_SIZE + data_off
+            buf[start : start + n] = mv[pbase : pbase + n]
+            received += rows
+        self._cam_bufs[channel] = (sample, w, h, buf, received)
+        if row_offset + rows >= h:
+            self._cam_bufs.pop(channel, None)
+            if received < h:
+                return None
+            pbase = _CAM_HEADER_SIZE + props_off
+            props = unpack_map(bytes(mv[pbase : pbase + props_len])) if props_len > 0 else {}
+            return CameraImage(
+                link=self.link,
+                sim_time_s=sim_time_s,
+                sample=sample,
+                width=w,
+                height=h,
+                channel=channel,
+                fov_y_rad=fov_y_rad,
+                max_range_m=max_range_m,
+                data=bytes(buf),
+                props=props,
+            )
+        return None
 
     def _push_lidar(self, chunk: LidarScan) -> LidarSweep | None:
         total = chunk.rows * chunk.cols
@@ -914,7 +1053,7 @@ def _default_node() -> peerbus.Node:
         "no_relay": True,
         "max_payload_bytes": 16 * 1024,
         "history_depth": 1,
-        "subscriber_buffer": 512,
+        "subscriber_buffer": 1024,
         "max_publishers": 24,
         "max_subscribers": 16,
     }
